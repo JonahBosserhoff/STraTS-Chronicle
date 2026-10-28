@@ -143,9 +143,9 @@ class Strats(TimeSeriesModel):
         if self.training:
             with torch.no_grad():
                 var_mask = (torch.rand((bsz,self.V), device=device)<=self.dropout).int()
-                for v in range(self.V):
-                    mask_pos = (varis==v).int()*var_mask[:,v:v+1]
-                    obs_mask = obs_mask*(1-mask_pos)
+                # drop every observation of a dropped variable (vectorized; a loop over
+                # all V variables is slow with Chronicle's ~800 variables)
+                obs_mask = obs_mask*(1-var_mask.gather(1, varis.long()))
 
         # demographics embedding
         demo_emb = self.demo_emb(demo) if self.args.model_type=='strats' \

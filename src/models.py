@@ -26,6 +26,16 @@ def count_parameters(logger: Logger, model: nn.Module):
         logger.write(str(k)+': '+str(v)+', '+str(100*v/total)+'%')
 
 
+def cox_loss(risk, labels):
+    """Negative Cox partial log-likelihood (Breslow, no tie correction), as Chronicle's
+    chronicle.losses.cox_loss. The risk set is the batch, which holds one cut of each patient.
+    risk: [N] (higher = higher hazard), labels: [N, 2] = (time, event)."""
+    order = torch.argsort(labels[:,0], descending=True)
+    risk, event = risk[order], labels[order,1]
+    log_cumsum = torch.logcumsumexp(risk, dim=0)
+    return -((risk-log_cumsum)*event).sum()/event.sum().clamp_min(1.0)
+
+
 class TimeSeriesModel(nn.Module):
     def __init__(self, args: argparse.Namespace):
         super().__init__()
@@ -42,6 +52,8 @@ class TimeSeriesModel(nn.Module):
             ts_demo_emb_size = args.hid_dim*2
         self.pretrain = args.pretrain==1
         self.finetune = args.load_ckpt_path is not None
+        # Chronicle benchmark: the head outputs an OS risk score trained with a Cox loss
+        self.survival = args.dataset=='chronicle'
         if self.pretrain:
             self.forecast_head = nn.Linear(ts_demo_emb_size, args.V)
         elif self.finetune:
@@ -50,9 +62,12 @@ class TimeSeriesModel(nn.Module):
             self.pos_class_weight = torch.tensor(args.pos_class_weight)
         else:
             self.binary_head = nn.Linear(ts_demo_emb_size,1)
-            self.pos_class_weight = torch.tensor(args.pos_class_weight)
+            if not self.survival:
+                self.pos_class_weight = torch.tensor(args.pos_class_weight)
 
     def binary_cls_final(self, logits, labels):
+        if self.survival:
+            return cox_loss(logits, labels) if labels is not None else logits
         if labels is not None:
             return F.binary_cross_entropy_with_logits(logits, labels, 
                                     pos_weight=self.pos_class_weight)

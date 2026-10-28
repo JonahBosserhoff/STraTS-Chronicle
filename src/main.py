@@ -4,6 +4,7 @@ from utils import Logger, set_all_seeds
 import torch
 from dataset_pretrain import PretrainDataset
 from dataset import Dataset
+from dataset_chronicle import ChronicleDataset
 from modeling_strats import Strats
 from modeling_gru import GRU_TS
 from modeling_tcn import TCN_TS
@@ -16,6 +17,7 @@ from transformers.optimization import AdamW
 from models import count_parameters
 from evaluator import Evaluator
 from evaluator_pretrain import PretrainEvaluator
+from evaluator_survival import SurvivalEvaluator
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--print_train_loss_every', type=int, default=100)
     parser.add_argument('--validate_after', type=int, default=-1)
     parser.add_argument('--validate_every', type=int, default=None)
+    ## chronicle: random cut days per patient for eval (Chronicle's c_index_samples)
+    parser.add_argument('--num_eval_draws', type=int, default=10)
 
     args = parser.parse_args()
     return args
@@ -97,12 +101,18 @@ if __name__ == "__main__":
     set_output_dir(args)
     args.logger = Logger(args.output_dir, 'log.txt')
     args.logger.write('\n'+str(args))
-    args.device = torch.device('cuda')
+    args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     set_all_seeds(args.seed+int(args.run.split('o')[0]))
     model_path_best = os.path.join(args.output_dir, 'checkpoint_best.bin')
 
     # load data
-    dataset = PretrainDataset(args) if args.pretrain==1 else Dataset(args)
+    chronicle = args.dataset=='chronicle'
+    if chronicle:
+        assert args.model_type in ['strats', 'istrats'] and not args.pretrain \
+            and args.load_ckpt_path is None, 'chronicle: only supervised STraTS / iSTraTS'
+        dataset = ChronicleDataset(args)
+    else:
+        dataset = PretrainDataset(args) if args.pretrain==1 else Dataset(args)
 
     # load model
     model_class = {'strats':Strats, 'istrats':Strats, 'gru':GRU_TS, 'tcn':TCN_TS,
@@ -132,7 +142,10 @@ if __name__ == "__main__":
     best_val_res, best_test_res = None, None
     optimizer = AdamW(filter(lambda p:p.requires_grad, model.parameters()), lr=args.lr)
     train_bar = tqdm(range(args.max_steps))
-    evaluator = PretrainEvaluator(args) if args.pretrain==1 else Evaluator(args)
+    if chronicle:
+        evaluator = SurvivalEvaluator(args)
+    else:
+        evaluator = PretrainEvaluator(args) if args.pretrain==1 else Evaluator(args)
 
     # results before any training
     if args.validate_after<0:
@@ -182,8 +195,11 @@ if __name__ == "__main__":
             model.train(True)
 
             # Save ckpt if there is an improvement.
-            curr_val_metric = val_res['loss_neg'] if args.pretrain \
-                                else val_res['auprc']+val_res['auroc']
+            if chronicle:
+                curr_val_metric = val_res['c_index']
+            else:
+                curr_val_metric = val_res['loss_neg'] if args.pretrain \
+                                    else val_res['auprc']+val_res['auroc']
             if curr_val_metric>best_val_metric:
                 best_val_metric = curr_val_metric
                 best_val_res, best_test_res = val_res, test_res
@@ -200,3 +216,9 @@ if __name__ == "__main__":
     # print final res
     args.logger.write('Final val res: '+str(best_val_res))
     args.logger.write('Final test res: '+str(best_test_res))
+
+    # chronicle: save the test predictions of the best checkpoint
+    if chronicle:
+        model.load_state_dict(torch.load(model_path_best))
+        evaluator.evaluate(model, dataset, 'test', train_step=None,
+                           save_path=os.path.join(args.output_dir, 'predictions_test.csv'))

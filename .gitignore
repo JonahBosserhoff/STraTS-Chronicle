@@ -1,0 +1,4 @@
+# processed data and run outputs (patient-level data must never be committed)
+data/
+outputs/
+.DS_Store
