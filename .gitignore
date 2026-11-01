@@ -3,3 +3,4 @@ data/
 outputs/
 .DS_Store
 strats_os-*.out
+strats_chronicle-*.out

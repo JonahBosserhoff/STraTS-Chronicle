@@ -70,6 +70,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--validate_every', type=int, default=None)
     ## chronicle: random cut days per patient for eval (Chronicle's c_index_samples)
     parser.add_argument('--num_eval_draws', type=int, default=10)
+    ## chronicle: the target to predict, one head: OS, TTNT, any label_* column of the cohort
+    parser.add_argument('--target', type=str, default='OS')
+    ## splits evaluated at every validation besides val (comma-separated, '' for none). Only val
+    ## selects the checkpoint, and evaluation draws no random numbers, so leaving out test changes
+    ## neither training nor the final test result (with --dataset chronicle the best checkpoint is
+    ## evaluated on test at the end anyway); it only saves the time of evaluating test every epoch.
+    parser.add_argument('--eval_during_training', type=str, default='eval_train,test')
 
     args = parser.parse_args()
     return args
@@ -89,7 +96,7 @@ def set_output_dir(args: argparse.Namespace) -> None:
             if args.model_type=='strats':
                 for param in ['num_layers', 'hid_dim', 'num_heads', 'dropout', 'attention_dropout', 'lr']:
                     args.output_dir += ','+param+':'+str(getattr(args, param))
-            for param in ['train_frac', 'run']:
+            for param in (['target'] if args.dataset=='chronicle' else [])+['train_frac', 'run']:
                 args.output_dir += '|'+param+':'+str(getattr(args, param))
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -108,6 +115,9 @@ if __name__ == "__main__":
 
     # load data
     chronicle = args.dataset=='chronicle'
+    eval_splits = [s for s in args.eval_during_training.split(',') if s]
+    assert set(eval_splits)<={'eval_train', 'test'} and (chronicle or eval_splits==['eval_train', 'test']), \
+        '--eval_during_training: subset of eval_train,test, and only with --dataset chronicle'
     if chronicle:
         assert args.model_type in ['strats', 'istrats'] and not args.pretrain \
             and args.load_ckpt_path is None, 'chronicle: only supervised STraTS / iSTraTS'
@@ -155,8 +165,8 @@ if __name__ == "__main__":
     if args.validate_after<0:
         results = evaluator.evaluate(model, dataset, 'val',  train_step=-1)
         if not(args.pretrain):
-            evaluator.evaluate(model, dataset, 'eval_train', train_step=-1)
-            evaluator.evaluate(model, dataset, 'test', train_step=-1)
+            for split in eval_splits:
+                evaluator.evaluate(model, dataset, split, train_step=-1)
     
     model.train()
     for step in train_bar:
@@ -192,15 +202,18 @@ if __name__ == "__main__":
             # get metrics on test and validation splits
             val_res = evaluator.evaluate(model, dataset, 'val', train_step=step)
             if not(args.pretrain):
-                evaluator.evaluate(model, dataset, 'eval_train', train_step=step)
-                test_res = evaluator.evaluate(model, dataset, 'test', train_step=step)
+                test_res = None
+                for split in eval_splits:
+                    res = evaluator.evaluate(model, dataset, split, train_step=step)
+                    if split=='test':
+                        test_res = res
             else:
                 test_res = None
             model.train(True)
 
             # Save ckpt if there is an improvement.
             if chronicle:
-                curr_val_metric = val_res['c_index']
+                curr_val_metric = val_res[evaluator.metric]
             else:
                 curr_val_metric = val_res['loss_neg'] if args.pretrain \
                                     else val_res['auprc']+val_res['auroc']
@@ -219,10 +232,18 @@ if __name__ == "__main__":
     
     # print final res
     args.logger.write('Final val res: '+str(best_val_res))
-    args.logger.write('Final test res: '+str(best_test_res))
+    args.logger.write('Final test res: '+(str(best_test_res) if 'test' in eval_splits else
+                      'test not evaluated during training (--eval_during_training), see below'))
 
-    # chronicle: save the test predictions of the best checkpoint
+    # chronicle: test result and predictions of the best checkpoint (the same as the final test
+    # res above if test is evaluated during training)
     if chronicle:
         model.load_state_dict(torch.load(model_path_best))
-        evaluator.evaluate(model, dataset, 'test', train_step=None,
-                           save_path=os.path.join(args.output_dir, 'predictions_test.csv'))
+        test_res = evaluator.evaluate(model, dataset, 'test', train_step=None,
+                                      save_path=os.path.join(args.output_dir, 'predictions_test.csv'))
+        args.logger.write('Test res of the best checkpoint: '+str(test_res))
+        # regression / binary: also every day with a target, as Chronicle scores these targets
+        if args.target_type!='survival':
+            test_res = evaluator.evaluate(model, dataset, 'test', train_step=None, all_days=True,
+                                          save_path=os.path.join(args.output_dir, 'predictions_test_all_days.csv'))
+            args.logger.write('Test res of the best checkpoint, all days with a target: '+str(test_res))

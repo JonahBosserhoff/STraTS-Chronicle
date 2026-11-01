@@ -52,8 +52,9 @@ class TimeSeriesModel(nn.Module):
             ts_demo_emb_size = args.hid_dim*2
         self.pretrain = args.pretrain==1
         self.finetune = args.load_ckpt_path is not None
-        # Chronicle benchmark: the head outputs an OS risk score trained with a Cox loss
-        self.survival = args.dataset=='chronicle'
+        # Chronicle benchmark: one head for the chosen target (--target), with the loss of its
+        # type as in Chronicle: Cox (survival: risk score), MSE (regression), BCE with logits (binary)
+        self.chronicle_target = args.target_type if args.dataset=='chronicle' else None
         if self.pretrain:
             self.forecast_head = nn.Linear(ts_demo_emb_size, args.V)
         elif self.finetune:
@@ -62,12 +63,16 @@ class TimeSeriesModel(nn.Module):
             self.pos_class_weight = torch.tensor(args.pos_class_weight)
         else:
             self.binary_head = nn.Linear(ts_demo_emb_size,1)
-            if not self.survival:
+            if self.chronicle_target is None:
                 self.pos_class_weight = torch.tensor(args.pos_class_weight)
 
     def binary_cls_final(self, logits, labels):
-        if self.survival:
-            return cox_loss(logits, labels) if labels is not None else logits
+        if self.chronicle_target is not None:
+            if labels is None:
+                return logits # risk score / regression value / logit
+            loss = {'survival':cox_loss, 'regression':F.mse_loss,
+                    'binary':F.binary_cross_entropy_with_logits}[self.chronicle_target]
+            return loss(logits, labels)
         if labels is not None:
             return F.binary_cross_entropy_with_logits(logits, labels, 
                                     pos_weight=self.pos_class_weight)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Chronicle cohort -> data/processed/chronicle.pkl (src/preprocess_chronicle.py), CPU only.
-# Run once before train_chronicle(_array).sbatch. Submit from the repo root:
+# Run once before train_chronicle.sbatch / submit_chronicle.sh (one pickle for all targets). From the repo root:
 #   CHRONICLE_DATA_DIR=<chronicle-preprocess output dir> GLOBAL_FORMAT=<schema csv> sbatch preprocess_chronicle.sbatch
 #SBATCH --job-name=strats_prep
 #SBATCH --cpus-per-task=4

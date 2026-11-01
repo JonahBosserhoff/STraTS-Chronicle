@@ -3,19 +3,22 @@
 # Relative paths are relative to src/.
 
 # external cohort: raw (unscaled) CSV in Chronicle's long format, like the input of chronicle-preprocess
-# (patient_id, time_since_initial_diagnosis, feature_name, feature_value, OS_TIME, OS_EVENT)
+# (patient_id, time_since_initial_diagnosis, feature_name, feature_value, and the target's columns:
+#  OS_TIME, OS_EVENT / TTNT_TIME, TTNT_EVENT / label_...)
 cohort: /path/to/external_cohort.csv
 
 # Chronicle scalers of the TRAINING cohort (<chronicle data dir>/scalers, with feature_scalers.pkl).
 # null if the cohort is already scaled with them (e.g. chronicle-preprocess --pretrained-scaler-dir).
 scaler_dir: /path/to/training_chronicle_dir/scalers
 
-# training run directory with checkpoint_best.bin and inference.pkl (written by main.py)
-model_dir: "../outputs/chronicle/strats,num_layers:2,hid_dim:64,num_heads:16,dropout:0.2,attention_dropout:0.2,lr:0.0005|train_frac:1.0|run:1o5"
+# training run directory with checkpoint_best.bin and inference.pkl (written by main.py). The target
+# (and its type) is the one of this run; runs from before --target (no "|target:" in the name) are OS.
+# For a regression target, scaler_dir must also hold the label scalers (label_scalers.pkl).
+model_dir: "../outputs/chronicle/strats,num_layers:2,hid_dim:64,num_heads:16,dropout:0.2,attention_dropout:0.2,lr:0.0005|target:OS|train_frac:1.0|run:1o5"
 
 output_dir: ../outputs/chronicle_external/
 
-# random cut days per patient (C-index mean ± std over draws), as during training
+# random cut days per patient (metric mean ± std over draws), as during training
 num_eval_draws: 10
 seed: 2023
 eval_batch_size: 32
