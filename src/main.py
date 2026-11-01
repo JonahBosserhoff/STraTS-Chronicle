@@ -1,5 +1,6 @@
 import argparse
 import os
+import pickle
 from utils import Logger, set_all_seeds
 import torch
 from dataset_pretrain import PretrainDataset
@@ -111,6 +112,9 @@ if __name__ == "__main__":
         assert args.model_type in ['strats', 'istrats'] and not args.pretrain \
             and args.load_ckpt_path is None, 'chronicle: only supervised STraTS / iSTraTS'
         dataset = ChronicleDataset(args)
+        # for external_validation.py: hyperparameters and training statistics of this run
+        pickle.dump({'args':{k:v for k,v in vars(args).items() if k not in ['logger', 'device']},
+                     'norm':dataset.norm}, open(os.path.join(args.output_dir, 'inference.pkl'), 'wb'))
     else:
         dataset = PretrainDataset(args) if args.pretrain==1 else Dataset(args)
 

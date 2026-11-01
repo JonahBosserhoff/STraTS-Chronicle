@@ -45,11 +45,11 @@ prediction time points and metric. Only OS is supported; everything else uses th
 
 ### Run
 ```
-pip install lifelines
+pip install lifelines pyyaml
 chmod +x run_chronicle.sh
 CHRONICLE_DATA_DIR=<chronicle-preprocess output dir> GLOBAL_FORMAT=<schema csv> ./run_chronicle.sh
 ```
-Output in `outputs/chronicle/strats,.../`: `log.txt`, `checkpoint_best.bin` and `predictions_test.csv`.
+Output in `outputs/chronicle/strats,.../`: `log.txt`, `checkpoint_best.bin`, `inference.pkl` and `predictions_test.csv`.
 
 ### What changed
 | File | Change |
@@ -60,6 +60,7 @@ Output in `outputs/chronicle/strats,.../`: `log.txt`, `checkpoint_best.bin` and 
 | `src/models.py` | Cox loss; with `--dataset chronicle` the output head is an OS risk score |
 | `src/main.py` | selects the above for `--dataset chronicle`, selects the checkpoint by validation C-index, saves the test predictions of the best checkpoint, falls back to CPU without CUDA |
 | `src/modeling_strats.py` | variable dropout vectorized (same result as the loop over all variables, which is slow with Chronicle's ~800 variables) |
+| `src/external_validation.py`, `external_validation.yaml` | new: inference of a trained model on an external cohort |
 | `run_chronicle.sh`, `.gitignore` | run script; `data/` and `outputs/` are not tracked |
 
 The original datasets and models (PhysioNet, MIMIC-III, GRU-D, ...) are unchanged.
@@ -96,6 +97,22 @@ checkpoint with the best validation C-index is kept (patience 10).
 **Predictions.** `predictions_test.csv` holds the best checkpoint's test predictions, one row per
 patient and draw: `patient_id, draw, day, prediction, time, event` (`day` = cut day, `time` =
 remaining OS time in days). Columns as in Chronicle's `predictions_test/OS.parquet`, plus `draw`.
+
+### External validation
+Scores a trained model on an external cohort, without training:
+```
+cd src
+python external_validation.py --config ../external_validation.yaml
+```
+`external_validation.yaml` sets the external cohort (raw, unscaled CSV in Chronicle's long format, like
+the input of `chronicle-preprocess`), the Chronicle scalers of the training cohort (`scaler_dir`, or
+`null` if the cohort is already scaled with them), the training run (`model_dir`) and `output_dir`.
+The cohort goes through the same steps as the training data: Chronicle scalers, then the STraTS
+normalization of the training run from `inference.pkl` (variable vocabulary, per-variable mean/std,
+static mean/std), which `main.py` saves next to `checkpoint_best.bin`. Variables the model was not
+trained on are dropped; a missing static variable is filled with the training mean. The metric is
+the C-index over `num_eval_draws` random cut days per patient, as for the test split. Output:
+`log.txt` and `predictions_external.csv` (columns as `predictions_test.csv`).
 
 ### Differences to Chronicle
 - Training batch size 16 (STraTS default) is also the Cox risk set; Chronicle uses 128.

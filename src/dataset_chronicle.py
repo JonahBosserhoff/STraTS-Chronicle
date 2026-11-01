@@ -14,7 +14,9 @@ same prediction point as a <CLS> token in Chronicle.
 If more than max_obs observations remain before the cut, the most recent max_obs are kept.
 
 Otherwise as in dataset.py: only variables seen in the training set, values z-scored per
-variable with train statistics, static variables in a separate demo vector.
+variable with train statistics, static variables in a separate demo vector. The training
+statistics (self.norm) are saved with the model, so external_validation.py can map an
+external cohort the same way.
 """
 import pickle
 
@@ -30,61 +32,78 @@ STATIC_VARIS = ['age_at_diagnosis', 'gender_female']
 
 
 class ChronicleDataset:
-    def __init__(self, args) -> None:
-        assert args.train_frac==1, 'The Chronicle benchmark uses the full Chronicle splits: pass --train_frac 1.0'
-        filepath = '../data/processed/'+args.dataset+'.pkl'
-        data, oc, train_ids, val_ids, test_ids = pickle.load(open(filepath,'rb'))
-        args.logger.write('\nPreparing dataset '+args.dataset)
+    def __init__(self, args, external=None) -> None:
+        """external: None to train on the Chronicle splits, whose training statistics are kept in
+        self.norm (saved with the model). For external validation (data, oc, norm): a cohort in the
+        same format, normalized with the norm of the training run, as one split 'external'."""
+        if external is None:
+            assert args.train_frac==1, 'The Chronicle benchmark uses the full Chronicle splits: pass --train_frac 1.0'
+            filepath = '../data/processed/'+args.dataset+'.pkl'
+            data, oc, train_ids, val_ids, test_ids = pickle.load(open(filepath,'rb'))
+            args.logger.write('\nPreparing dataset '+args.dataset)
+            split_ids = {'train':train_ids, 'val':val_ids, 'test':test_ids}
+            norm = None
+            known_variables = data.loc[data.ts_id.isin(train_ids)].variable.unique()
+        else:
+            data, oc, norm = external
+            args.logger.write('\nPreparing external dataset')
+            split_ids = {'external':oc.ts_id.unique()}
+            known_variables = np.concatenate((norm['variables'], STATIC_VARIS))
 
         # keep variables seen in training set only
-        train_variables = data.loc[data.ts_id.isin(train_ids)].variable.unique()
-        delete_variables = np.setdiff1d(data.variable.unique(), train_variables)
+        delete_variables = np.setdiff1d(data.variable.unique(), known_variables)
         args.logger.write('Removing variables not in training set: '+str(delete_variables))
-        data = data.loc[data.variable.isin(train_variables)]
+        data = data.loc[data.variable.isin(known_variables)]
 
         # split off static variables
         static_ii = data.variable.isin(STATIC_VARIS)
         demo = data.loc[static_ii].groupby(['ts_id', 'variable']).value.last().unstack()
         missing = np.setdiff1d(STATIC_VARIS, demo.columns)
-        assert len(missing)==0, 'Static variables not in the data: '+str(missing)
+        args.logger.write('Static variables not in the data (filled with the training mean): '+str(missing))
+        assert norm is not None or len(missing)==0, 'Static variables not in the data: '+str(missing)
         data = data.loc[~static_ii]
 
         # A patient without any time-series observation has no day to cut at (and an
         # empty sequence would make attention NaN), so they are dropped, as dataset.py
         # drops time series without data.
         curr_ids = data.ts_id.unique()
-        num_before = [len(train_ids), len(val_ids), len(test_ids)]
-        train_ids, val_ids, test_ids = [np.intersect1d(ids, curr_ids) for ids in (train_ids, val_ids, test_ids)]
-        args.logger.write('# train, val, test patients: '+str([len(train_ids), len(val_ids), len(test_ids)])
+        num_before = [len(ids) for ids in split_ids.values()]
+        split_ids = {s:np.intersect1d(ids, curr_ids) for s,ids in split_ids.items()}
+        args.logger.write('# patients in '+str(list(split_ids))+': '+str([len(ids) for ids in split_ids.values()])
                           +' (before dropping patients without time-series data: '+str(num_before)+')')
-        self.ts_ids = np.concatenate((train_ids, val_ids, test_ids))
+        self.ts_ids = np.concatenate(list(split_ids.values()))
         N = len(self.ts_ids)
         ts_id_to_ind = {ts_id:i for i,ts_id in enumerate(self.ts_ids)}
-        self.splits = {'train':[ts_id_to_ind[i] for i in train_ids],
-                       'val':[ts_id_to_ind[i] for i in val_ids],
-                       'test':[ts_id_to_ind[i] for i in test_ids]}
-        self.splits['eval_train'] = self.splits['train'][:2000]
+        self.splits = {s:[ts_id_to_ind[i] for i in ids] for s,ids in split_ids.items()}
+        if 'train' in self.splits:
+            self.splits['eval_train'] = self.splits['train'][:2000]
 
-        # static data: mean-fill missing values, then normalize (train statistics)
+        # training statistics: static data mean-filled, then normalized; values normalized
+        # per variable. With many sparse variables, one seen only once in train has std NaN;
+        # it is treated like a constant one (std 1).
         demo = demo.reindex(index=self.ts_ids, columns=STATIC_VARIS)
-        demo = demo.fillna(demo.loc[train_ids].mean())
-        means, stds = demo.loc[train_ids].mean(), demo.loc[train_ids].std(ddof=0)
-        stds[stds==0] = 1
-        self.demo = ((demo-means)/stds).to_numpy()
+        if norm is None:
+            train_ids = split_ids['train']
+            demo_train = demo.loc[train_ids]
+            demo_std = demo_train.fillna(demo_train.mean()).std(ddof=0)
+            demo_std[demo_std==0] = 1
+            means_stds = data.loc[data.ts_id.isin(train_ids)].groupby('variable').value.agg(['mean', 'std'])
+            means_stds['std'] = means_stds['std'].fillna(1).replace(0, 1)
+            norm = {'demo_mean':demo_train.mean(), 'demo_std':demo_std, 'means_stds':means_stds,
+                    'max_day':data.loc[data.ts_id.isin(train_ids), 'day'].max(),
+                    'variables':data.variable.unique()}
+        self.norm = norm
+
+        self.demo = ((demo.fillna(norm['demo_mean'])-norm['demo_mean'])/norm['demo_std']).to_numpy()
         args.D = len(STATIC_VARIS)
         args.logger.write('# static features: '+str(args.D))
 
-        # normalize values. With many sparse variables, one seen only once in train has
-        # std NaN; it is treated like a constant one (std 1).
-        means_stds = data.loc[data.ts_id.isin(train_ids)].groupby('variable').value.agg(['mean', 'std'])
-        means_stds['std'] = means_stds['std'].fillna(1).replace(0, 1)
-        data = data.merge(means_stds.reset_index(), on='variable', how='left')
+        data = data.merge(norm['means_stds'].reset_index(), on='variable', how='left')
         data['value'] = (data['value']-data['mean'])/data['std']
-        max_day = data.loc[data.ts_id.isin(train_ids), 'day'].max()
+        max_day = norm['max_day']
 
-        variables = data.variable.unique()
-        var_to_ind = {v:i for i,v in enumerate(variables)}
-        args.V = len(variables)
+        var_to_ind = {v:i for i,v in enumerate(norm['variables'])}
+        args.V = len(var_to_ind)
         args.logger.write('# TS variables: '+str(args.V))
 
         # one array per patient, sorted by day
@@ -103,15 +122,16 @@ class ChronicleDataset:
         oc = oc.set_index('ts_id').loc[self.ts_ids]
         self.os_end_day = oc['os_end_day'].to_numpy()
         self.os_event = oc['os_event'].to_numpy()
-        args.logger.write('% events in train, val, test: '
-                          +str([self.os_event[self.splits[s]].mean() for s in ['train', 'val', 'test']]))
+        args.logger.write('% events in '+str(list(split_ids))+': '
+                          +str([self.os_event[self.splits[s]].mean() for s in split_ids]))
 
         rng = np.random.default_rng(args.seed)
         self.eval_cuts = {split:[np.array([rng.choice(self.cut_days[i]) for i in self.splits[split]])
                                  for _ in range(args.num_eval_draws)]
-                          for split in ['eval_train', 'val', 'test']}
+                          for split in ['eval_train', 'val', 'test', 'external'] if split in self.splits}
         self.args = args
-        self.train_cycler = CycleIndex(self.splits['train'], args.train_batch_size)
+        if 'train' in self.splits:
+            self.train_cycler = CycleIndex(self.splits['train'], args.train_batch_size)
 
     def get_batch(self, ind=None, cut_days=None):
         if ind is None:
