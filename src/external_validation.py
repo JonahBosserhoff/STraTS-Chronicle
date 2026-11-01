@@ -14,7 +14,9 @@ per patient, and for a regression / binary target also over every day with a tar
     cd src && python external_validation.py --config ../external_validation.yaml
 
 Output in output_dir: log.txt and predictions_external.csv (columns as predictions_test.csv),
-for a regression / binary target also predictions_external_all_days.csv.
+for a regression / binary target also predictions_external_all_days.csv. Regression predictions
+and labels are saved in the original units, as Chronicle does: mapped back with the label scaler
+from scaler_dir, or with scaler_dir null with the one in inference.pkl (none for older runs).
 """
 import argparse
 import os
@@ -50,6 +52,9 @@ args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # cohort, scaled with the Chronicle scalers of the training cohort
 df = pd.read_csv(cfg['cohort'])
 args.logger.write('Read '+cfg['cohort']+': '+str(len(df))+' rows, '+str(df.patient_id.nunique())+' patients')
+# regression: Chronicle label scaler for saving the predictions in the original units, as Chronicle.
+# The one of the training run (saved by main.py; None for runs from before) unless scaler_dir is set.
+label_scaler = saved.get('label_scaler')
 if cfg['scaler_dir'] is not None:
     scalers = joblib.load(os.path.join(cfg['scaler_dir'], 'feature_scalers.pkl'))
     df['feature_value'] = df['feature_value'].astype(float)
@@ -60,16 +65,22 @@ if cfg['scaler_dir'] is not None:
     if args.target_type=='regression':
         # as chronicle-preprocess: a label is scaled if the training cohort has a scaler for it
         label_scalers = joblib.load(os.path.join(cfg['scaler_dir'], 'label_scalers.pkl'))
-        if args.target in label_scalers and args.target in df.columns:
+        # the same scaler maps the saved predictions back to the original units
+        label_scaler = label_scalers.get(args.target)
+        if label_scaler is not None and args.target in df.columns:
             values = df[args.target].astype(float)
             usable = values.index[values.notna()]
             df[args.target] = values
-            df.loc[usable, args.target] = label_scalers[args.target].transform(
+            df.loc[usable, args.target] = label_scaler.transform(
                 values.loc[usable].to_numpy().reshape(-1, 1)).ravel()
             args.logger.write('Scaled target '+args.target+' with its Chronicle label scaler')
         else:
             args.logger.write('WARNING: target '+args.target+' not scaled (no label scaler in '
                               +cfg['scaler_dir']+', or not in the cohort)')
+if args.target_type=='regression':
+    args.logger.write('Predictions are saved in the original units (Chronicle label scaler of '+args.target+')'
+                      if label_scaler is not None else 'WARNING: no Chronicle label scaler for '+args.target
+                      +': predictions are saved in the units of the model output')
 dataset = ChronicleDataset(args, external=(*to_strats(df), saved['norm']))
 
 # best checkpoint of the training run
@@ -77,7 +88,7 @@ model = Strats(args)
 model.load_state_dict(torch.load(os.path.join(cfg['model_dir'], 'checkpoint_best.bin'), map_location=args.device))
 model.to(args.device)
 
-evaluator = SurvivalEvaluator(args)
+evaluator = SurvivalEvaluator(args, label_scaler)
 result = evaluator.evaluate(model, dataset, 'external', train_step=None,
                             save_path=os.path.join(cfg['output_dir'], 'predictions_external.csv'))
 args.logger.write('External res: '+str(result))

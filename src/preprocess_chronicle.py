@@ -16,10 +16,15 @@ Output: ../data/processed/chronicle.pkl = [data, oc, train_ids, val_ids, test_id
                                           main.py (--target), so one preprocessing serves all.
 The targets of a day are taken from its first row, as Chronicle's <CLS> token of that day
 copies the labels of the day's first observation (they are constant within a day).
+
+Also copies Chronicle's label scalers (<data_dir>/scalers/label_scalers.pkl) to
+../data/processed/chronicle_label_scalers.pkl, so that main.py saves regression predictions
+in the original units, as Chronicle does (the metrics stay on the scaled values, as in Chronicle).
 """
 import argparse
 import os
 import pickle
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -83,3 +88,15 @@ if __name__ == '__main__':
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     pickle.dump([data, oc, split_ids['train'], split_ids['val'], split_ids['test']], open(args.out, 'wb'))
     print('Saved', args.out)
+
+    # Chronicle's label scalers of this cohort, to save regression predictions in the original
+    # units (a copy left over from another cohort is removed)
+    scaler_src = Path(args.data_dir)/'scalers'/'label_scalers.pkl'
+    scaler_out = os.path.splitext(args.out)[0]+'_label_scalers.pkl'
+    if scaler_src.is_file():
+        shutil.copyfile(scaler_src, scaler_out)
+        print('Copied', scaler_src, 'to', scaler_out)
+    else:
+        if os.path.exists(scaler_out):
+            os.remove(scaler_out)
+        print('WARNING: no', scaler_src, '- regression predictions will be saved in the scaled units')

@@ -1,6 +1,7 @@
 import argparse
 import os
 import pickle
+import joblib
 from utils import Logger, set_all_seeds
 import torch
 from dataset_pretrain import PretrainDataset
@@ -122,9 +123,25 @@ if __name__ == "__main__":
         assert args.model_type in ['strats', 'istrats'] and not args.pretrain \
             and args.load_ckpt_path is None, 'chronicle: only supervised STraTS / iSTraTS'
         dataset = ChronicleDataset(args)
+        # regression: Chronicle's label scaler of the target (copied by preprocess_chronicle.py),
+        # so that predictions are saved in the original units, as Chronicle does. Metrics stay
+        # on the scaled values, as in Chronicle.
+        label_scaler = None
+        if args.target_type=='regression':
+            scaler_path = '../data/processed/'+args.dataset+'_label_scalers.pkl'
+            if not os.path.exists(scaler_path):
+                args.logger.write('WARNING: '+scaler_path+' not found (re-run preprocess_chronicle.py): '
+                                  'predictions are saved in the scaled units')
+            else:
+                label_scaler = joblib.load(scaler_path).get(args.target)
+                args.logger.write('Predictions are saved in the original units (Chronicle label scaler of '
+                                  +args.target+')' if label_scaler is not None else 'No Chronicle label '
+                                  'scaler for '+args.target+' (not scaled by chronicle-preprocess): predictions '
+                                  'are saved as they are, in the units of the data')
         # for external_validation.py: hyperparameters and training statistics of this run
         pickle.dump({'args':{k:v for k,v in vars(args).items() if k not in ['logger', 'device']},
-                     'norm':dataset.norm}, open(os.path.join(args.output_dir, 'inference.pkl'), 'wb'))
+                     'norm':dataset.norm, 'label_scaler':label_scaler},
+                    open(os.path.join(args.output_dir, 'inference.pkl'), 'wb'))
     else:
         dataset = PretrainDataset(args) if args.pretrain==1 else Dataset(args)
 
@@ -157,7 +174,7 @@ if __name__ == "__main__":
     optimizer = AdamW(filter(lambda p:p.requires_grad, model.parameters()), lr=args.lr)
     train_bar = tqdm(range(args.max_steps))
     if chronicle:
-        evaluator = SurvivalEvaluator(args)
+        evaluator = SurvivalEvaluator(args, label_scaler)
     else:
         evaluator = PretrainEvaluator(args) if args.pretrain==1 else Evaluator(args)
 

@@ -41,6 +41,15 @@ TARGET=label_supportive_care_transfusion_7_days RUN=2o5 sbatch train_chronicle.s
   `checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` und bei Regression/Binär
   zusätzlich `predictions_test_all_days.csv`. Das Endergebnis steht in `log.txt` unter
   `Test res of the best checkpoint` (bei Regression/Binär zusätzlich `…, all days with a target`).
+- **Vorhersagedateien wie bei Chronicle:** Spalten `patient_id, draw, day, prediction` plus
+  `time, event` (Survival) bzw. `ground_truth` (Regression/Binär). Bei Regression stehen
+  `prediction` und `ground_truth` in **Originaleinheiten** (z. B. g/dL). Zurückgerechnet wird mit
+  Chronicles `label_scalers.pkl`, die das Preprocessing nach
+  `data/processed/chronicle_label_scalers.pkl` kopiert. Die Metriken im Log werden wie bei
+  Chronicle auf den skalierten Werten berechnet. Fehlt die Scaler-Datei, steht eine `WARNING` in
+  `log.txt` und die Werte bleiben skaliert. Binär: `prediction` = Logit
+  (Wahrscheinlichkeit = `1/(1+exp(-prediction))`). Survival: `prediction` = Risk-Score,
+  `time` = verbleibende Tage ab `day`.
 - **Hyperparameter** (Epochen, Patience, Lernrate, …) stehen als Argumente in
   `train_chronicle.sbatch` **und** `train_chronicle_array.sbatch`. Beide sollten gleich bleiben.
   Die Defaults stehen in `src/main.py` (`parse_args`).
@@ -73,9 +82,9 @@ TARGET=OS sbatch train_chronicle.sbatch
 sbatch external_validation.sbatch
 ```
 
-Gelesen werden aus dem Chronicle-Ordner nur die drei `*_{train,val,test}.csv`. Die Feature-Scaler
-sind darin schon angewendet und werden für das Training nicht gebraucht. Für die externe
-Validierung braucht man sie (`scaler_dir`).
+Gelesen werden aus dem Chronicle-Ordner die drei `*_{train,val,test}.csv` (Splits, schon
+skaliert) und `scalers/label_scalers.pkl` (nur, um Regressions-Vorhersagen in Originaleinheiten
+zu speichern). Für die externe Validierung braucht man zusätzlich die Feature-Scaler (`scaler_dir`).
 
 **Schneller als vorher:** Der Test-Split wird nur noch einmal am Ende mit dem besten Checkpoint
 ausgewertet statt in jeder Epoche (`--eval_during_training eval_train` in beiden sbatch-Skripten).
@@ -111,8 +120,11 @@ vektorisierte Variable-Dropout-Schleife in `modeling_strats.py` (gleiches Ergebn
 - Mit `--dataset chronicle`:
   - Lädt `ChronicleDataset` und `SurvivalEvaluator`.
   - Erlaubt nur `--model_type strats`/`istrats`, kein `--pretrain` und kein `--load_ckpt_path`.
-  - Speichert `inference.pkl` (Argumente des Laufs und Normalisierungsstatistik) für die
-    externe Validierung.
+  - Lädt bei Regression Chronicles Label-Scaler des Targets
+    (`data/processed/chronicle_label_scalers.pkl`), damit die Vorhersagen in Originaleinheiten
+    gespeichert werden.
+  - Speichert `inference.pkl` (Argumente des Laufs, Normalisierungsstatistik, Label-Scaler) für
+    die externe Validierung.
 - Bei Schritt -1 und jeder Validierung werden die Splits aus `--eval_during_training`
   ausgewertet statt fest `eval_train` und `test`.
 - Checkpoint-Auswahl mit `--dataset chronicle`: Validierungsmetrik des Targets (`c_index`,
@@ -148,9 +160,9 @@ vektorisierte Variable-Dropout-Schleife in `modeling_strats.py` (gleiches Ergebn
 
 | Datei | Inhalt |
 |---|---|
-| `src/preprocess_chronicle.py` | Chronicle-CSVs (`*_{train,val,test}.csv`) → `data/processed/chronicle.pkl` = `[data, oc, train_ids, val_ids, test_ids]`. `data`: ein Triplet (`ts_id, day, variable, value`) pro Beobachtung, nur Features aus dem Schema. `oc`: pro Patient und Tag alle Targets, aus der ersten Zeile des Tages. |
+| `src/preprocess_chronicle.py` | Chronicle-CSVs (`*_{train,val,test}.csv`) → `data/processed/chronicle.pkl` = `[data, oc, train_ids, val_ids, test_ids]`. `data`: ein Triplet (`ts_id, day, variable, value`) pro Beobachtung, nur Features aus dem Schema. `oc`: pro Patient und Tag alle Targets, aus der ersten Zeile des Tages. Kopiert außerdem `scalers/label_scalers.pkl` nach `data/processed/chronicle_label_scalers.pkl`. |
 | `src/dataset_chronicle.py` | Dataset: Historie bis zu einem Schnitt-Tag, Label des gewählten Targets an diesem Tag, Normalisierung, Batches |
-| `src/evaluator_survival.py` | Metrik je Target-Typ (C-Index / Pearson r / ROC AUC), Mittel ± Std über die Ziehungen, Speichern der Vorhersagen |
+| `src/evaluator_survival.py` | Metrik je Target-Typ (C-Index / Pearson r / ROC AUC), Mittel ± Std über die Ziehungen (auf skalierten Werten), Speichern der Vorhersagen (Regression in Originaleinheiten, wie Chronicle) |
 | `src/external_validation.py`, `external_validation.yaml`, `external_validation.sbatch` | Inference eines trainierten Modells auf einer externen Kohorte |
 | `preprocess_chronicle.sbatch` | SLURM: Preprocessing (CPU) |
 | `train_chronicle.sbatch` | SLURM: ein Lauf (`TARGET`, `RUN`), eine GPU |

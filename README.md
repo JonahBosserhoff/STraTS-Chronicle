@@ -80,9 +80,9 @@ Output in `outputs/chronicle/strats,...|target:<target>|train_frac:1.0|run:<r>o<
 ### What changed
 | File | Change |
 |---|---|
-| `src/preprocess_chronicle.py` | new: Chronicle split CSVs -> `data/processed/chronicle.pkl`, with every target per patient and day |
+| `src/preprocess_chronicle.py` | new: Chronicle split CSVs -> `data/processed/chronicle.pkl`, with every target per patient and day; copies Chronicle's label scalers |
 | `src/dataset_chronicle.py` | new: dataset with random cuts of each patient's history, labels of the chosen target (`--target`) |
-| `src/evaluator_survival.py` | new: C-index / Pearson r / AUC evaluation, saves test predictions |
+| `src/evaluator_survival.py` | new: C-index / Pearson r / AUC evaluation, saves test predictions (regression in the original units, as Chronicle) |
 | `src/models.py` | with `--dataset chronicle` the output head predicts the chosen target: Cox loss (survival), MSE (regression), BCE (binary) |
 | `src/main.py` | selects the above for `--dataset chronicle` (`--target`), selects the checkpoint by the validation metric, evaluates and saves the test predictions of the best checkpoint, `--eval_during_training`, falls back to CPU without CUDA |
 | `src/modeling_strats.py` | variable dropout vectorized (same result as the loop over all variables, which is slow with Chronicle's ~800 variables) |
@@ -142,10 +142,14 @@ The checkpoint with the best validation metric is kept (patience 10).
 **Predictions.** `predictions_test.csv` holds the best checkpoint's test predictions, one row per
 patient and draw: `patient_id, draw, day, prediction` plus `time, event` (survival; `time` = remaining
 time in days) or `ground_truth` (regression / binary). `day` is the cut day. `prediction` is the risk
-score (survival), the predicted value in the scaled units (regression) or the logit (binary).
+score (survival), the predicted value (regression) or the logit (binary).
 `predictions_test_all_days.csv` (regression / binary) has the same columns with one row per patient
-and day (`draw` 0). Columns as in Chronicle's `predictions_test/<target>.parquet`, plus `draw`;
-regression values are not transformed back to the original units.
+and day (`draw` 0). Columns as in Chronicle's `predictions_test/<target>.parquet`, plus `draw`.
+As in Chronicle, regression `prediction` and `ground_truth` are mapped back to the original units
+(e.g. g/dL) with Chronicle's label scaler of the target, which `preprocess_chronicle.py` copies from
+`<chronicle dir>/scalers/label_scalers.pkl` to `data/processed/chronicle_label_scalers.pkl`; the
+metrics are computed on the scaled values, as in Chronicle. Without that file (or for a label that
+`chronicle-preprocess` did not scale) the values are saved as they are, and `log.txt` says so.
 
 ### External validation
 Scores a trained model on an external cohort, without training:
@@ -163,7 +167,9 @@ next to `checkpoint_best.bin`. Variables the model was not trained on are droppe
 variable is filled with the training mean. The metric is computed over `num_eval_draws` random cut days
 per patient, as for the test split, and for regression / binary targets also over every day with a
 target. Output: `log.txt`, `predictions_external.csv` (columns as `predictions_test.csv`) and, for
-regression / binary targets, `predictions_external_all_days.csv`.
+regression / binary targets, `predictions_external_all_days.csv`. Regression predictions are saved in
+the original units, with the label scaler from `scaler_dir` (or, with `scaler_dir: null`, the one
+saved in `inference.pkl`; runs from before this have none and stay in the scaled units).
 
 ### Differences to Chronicle
 - One target per model (single head); Chronicle trains all targets jointly (multi-task).

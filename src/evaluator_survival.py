@@ -32,10 +32,14 @@ class SurvivalEvaluator:
     Chronicle: one cut day per patient, mean ± std over the dataset's num_eval_draws fixed draws of
     cut days (Chronicle's C-index). all_days=True scores every cut day of every patient at once
     (std 0), which is how Chronicle scores regression and binary targets (every <CLS> token with
-    a target)."""
-    def __init__(self, args):
+    a target).
+    label_scaler: Chronicle's label scaler of a regression target, or None. The metric is computed
+    on the scaled values; saved predictions (prediction, ground_truth) are mapped back to the
+    original units with it, as Chronicle does (chronicle.evaluation._prediction_rows)."""
+    def __init__(self, args, label_scaler=None):
         self.args = args
         self.metric = METRICS[args.target_type]
+        self.label_scaler = label_scaler
 
     def evaluate(self, model, dataset, split, train_step, save_path=None, all_days=False):
         self.args.logger.write('\nEvaluating on split = '+split+(' (all days with a target)' if all_days else ''))
@@ -57,10 +61,16 @@ class SurvivalEvaluator:
             pred, labels = torch.cat(pred).numpy(), torch.cat(labels).numpy()
             scores.append(score(self.args.target_type, pred, labels))
             if save_path is not None:
-                cols = {'time':labels[:,0], 'event':labels[:,1]} if self.args.target_type=='survival' \
-                        else {'ground_truth':labels}
+                if self.args.target_type=='survival':
+                    cols = {'prediction':pred, 'time':labels[:,0], 'event':labels[:,1]}
+                elif self.label_scaler is not None: # original units, as Chronicle
+                    unscale = lambda x:self.label_scaler.inverse_transform(
+                        np.asarray(x, dtype=float).reshape(-1, 1)).ravel()
+                    cols = {'prediction':unscale(pred), 'ground_truth':unscale(labels)}
+                else:
+                    cols = {'prediction':pred, 'ground_truth':labels}
                 predictions.append(pd.DataFrame({'patient_id':dataset.ts_ids[eval_ind], 'draw':draw,
-                                                 'day':cut_days, 'prediction':pred, **cols}))
+                                                 'day':cut_days, **cols}))
         # as Chronicle, a draw whose metric is undefined (one class, constant) is left out
         defined = [s for s in scores if not np.isnan(s)]
         if len(defined)<len(scores):
