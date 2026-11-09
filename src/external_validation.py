@@ -9,12 +9,13 @@ Variables the model was not trained on are dropped. The target is the one of the
 (OS for runs from before --target); a regression target is scaled with the Chronicle label
 scaler of the training cohort, as chronicle-preprocess does. The best checkpoint is then scored
 as the test split at the end of training: metric mean ± std over num_eval_draws random cut days
-per patient, and for a regression / binary target also over every day with a target.
+per patient, and for a regression / binary target also over every day with a target (the
+predictions of every day are saved for every target).
 
     cd src && python external_validation.py --config ../configs/external_validation.yaml
 
-Output in output_dir: log.txt and predictions_external.csv (columns as predictions_test.csv),
-for a regression / binary target also predictions_external_all_days.csv. Regression predictions
+Output in output_dir: log.txt, predictions_external.csv (columns as predictions_test.csv) and
+predictions_external_all_days.csv (every day with a target). Regression predictions
 and labels are saved in the original units, as Chronicle does: mapped back with the label scaler
 from scaler_dir, or with scaler_dir null with the one in inference.pkl (none for older runs).
 """
@@ -92,7 +93,8 @@ evaluator = SurvivalEvaluator(args, label_scaler)
 result = evaluator.evaluate(model, dataset, 'external', train_step=None,
                             save_path=os.path.join(cfg['output_dir'], 'predictions_external.csv'))
 args.logger.write('External res: '+str(result))
+# every day with a target, for every target (as main.py); the metric over all days for regression / binary only
+result = evaluator.evaluate(model, dataset, 'external', train_step=None, all_days=True,
+                            save_path=os.path.join(cfg['output_dir'], 'predictions_external_all_days.csv'))
 if args.target_type!='survival':
-    result = evaluator.evaluate(model, dataset, 'external', train_step=None, all_days=True,
-                                save_path=os.path.join(cfg['output_dir'], 'predictions_external_all_days.csv'))
     args.logger.write('External res, all days with a target: '+str(result))

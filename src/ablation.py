@@ -10,7 +10,8 @@ such a run is skipped, as is an unfinished run; both are logged and listed at th
 
 Test data. The test split is built as at the end of training (main.py): same patients, same cut days (the run's
 seed and num_eval_draws), same normalization (checked against inference.pkl), same metric (mean ± std over the
-draws of cut days and, for regression / binary targets, over every day with a target). Only the input changes, so
+draws of cut days and, for regression / binary targets, over every day with a target; the predictions of every
+day are saved for every target). Only the input changes, so
 0 % reproduces "Test res of the best checkpoint" of the run.
 
 Masking. For every percentage p of the config and every mask draw, round(p % x #features) features are drawn at
@@ -35,7 +36,7 @@ Output in output_dir:
     log.txt                          (log_task<i>.txt for SLURM array task i)
     <run folder>/                    per model: results.csv, overall_evaluation.csv, masked_features.csv
                                      (p, mask_draw, feature), log.txt and, with save_predictions, one folder
-                                     mask<p>_draw<d>/ with predictions_test.csv (and predictions_test_all_days.csv)
+                                     mask<p>_draw<d>/ with predictions_test.csv and predictions_test_all_days.csv
                                      as in the training run folder
 The two CSVs in output_dir are merged from the per-model files of every model in output_dir: use a new output_dir
 for a new ablation setting.
@@ -290,8 +291,11 @@ class Ablation:
         model.load_state_dict(torch.load(run_dir/'checkpoint_best.bin', map_location=device))
         model = AblationModel(model).to(device)
         evaluator = SurvivalEvaluator(args, saved.get('label_scaler'))
-        # every day with a target: as main.py (regression / binary; survival only if the run saved them)
-        all_days = args.target_type!='survival' or (run_dir/ALL_DAYS_NAME).is_file()
+        # every day with a target is scored and saved for every target, as main.py does
+        if not (run_dir/ALL_DAYS_NAME).is_file():
+            args.logger.write('WARNING: the training run has no '+ALL_DAYS_NAME+' (survival run trained before main.py '
+                              'saved it): overall_evaluation.py of the training run uses its drawn days, the ablation '
+                              'every day')
         scaled_units = saved_in_scaled_units(run_dir)
         pool = list(dataset.norm['variables'])+(STATIC_VARIS if cfg['include_static'] else [])
         assert len(set(pool))==len(pool), 'Feature names occur more than once'
@@ -327,11 +331,12 @@ class Ablation:
                        'obs_masked_frac':data.obs_masked_frac, 'metric':evaluator.metric,
                        'value':res[evaluator.metric], 'std':res[evaluator.metric+'_std'],
                        'empty_frac':np.mean([data.empty_frac(test_ind, cuts) for cuts in dataset.eval_cuts['test']])}
-                if all_days:
-                    res_all = evaluator.evaluate(model, data, 'test', train_step=None, all_days=True,
-                                                 save_path=save(ALL_DAYS_NAME))
-                    row.update({'value_all_days':res_all[evaluator.metric],
-                                'empty_frac_all_days':data.empty_frac(*dataset.all_cuts('test'))})
+                res_all = evaluator.evaluate(model, data, 'test', train_step=None, all_days=True,
+                                             save_path=save(ALL_DAYS_NAME))
+                # the metric over all days for regression / binary only, as main.py logs it (a C-index over every
+                # day of every patient is not Chronicle's C-index)
+                row.update({'value_all_days':res_all[evaluator.metric] if args.target_type!='survival' else np.nan,
+                            'empty_frac_all_days':data.empty_frac(*dataset.all_cuts('test'))})
                 args.logger.write('Test res: '+str(row))
                 rows.append(row)
                 write_csv(rows, out_dir/RESULTS_NAME)

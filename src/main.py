@@ -259,8 +259,10 @@ if __name__ == "__main__":
         test_res = evaluator.evaluate(model, dataset, 'test', train_step=None,
                                       save_path=os.path.join(args.output_dir, 'predictions_test.csv'))
         args.logger.write('Test res of the best checkpoint: '+str(test_res))
-        # regression / binary: also every day with a target, as Chronicle scores these targets
+        # predictions of every day with a target (every target; overall_evaluation.py samples days from them, as
+        # Chronicle). The metric over all days is logged for regression / binary only, as Chronicle scores these
+        # targets; a C-index over every day of every patient is not Chronicle's C-index.
+        test_res = evaluator.evaluate(model, dataset, 'test', train_step=None, all_days=True,
+                                      save_path=os.path.join(args.output_dir, 'predictions_test_all_days.csv'))
         if args.target_type!='survival':
-            test_res = evaluator.evaluate(model, dataset, 'test', train_step=None, all_days=True,
-                                          save_path=os.path.join(args.output_dir, 'predictions_test_all_days.csv'))
             args.logger.write('Test res of the best checkpoint, all days with a target: '+str(test_res))

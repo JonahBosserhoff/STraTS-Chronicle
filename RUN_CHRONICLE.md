@@ -73,9 +73,10 @@ bash scripts/train_chronicle.sbatch             # schickt alle Läufe als Job-Ar
   ```
   `<kohorten_ordner>/<ordnername>.csv` ist die rohe Kohorten-CSV (Geschlecht für AST/ALT/Kreatinin).
   Ergebnis: eine Zeile pro Lauf in `outputs/chronicle/overall_evaluation.csv`. Die Werte weichen
-  leicht vom Log ab (dort 10 Ziehungen mit Seed 2023). Läufe von vor dieser Änderung haben für
-  Survival keine `predictions_test_all_days.csv`; dann werden die gezogenen Tage aus
-  `predictions_test.csv` verwendet (mit Warnung, nicht ganz vergleichbar).
+  leicht vom Log ab (dort 10 Ziehungen mit Seed 2023). Survival-Läufe (OS, TTNT), die trainiert wurden,
+  bevor `main.py` für jedes Target alle Tage gespeichert hat, haben keine
+  `predictions_test_all_days.csv`; dann werden die gezogenen Tage aus `predictions_test.csv`
+  verwendet (mit Warnung, nicht ganz vergleichbar mit Chronicle).
 - **Vorhersagedateien wie bei Chronicle:** Spalten `patient_id, draw, day, prediction` plus
   `time, event` (Survival) bzw. `ground_truth` (Regression/Binär). Bei Regression stehen
   `prediction` und `ground_truth` in **Originaleinheiten** (z. B. g/dL). Zurückgerechnet wird mit

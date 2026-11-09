@@ -73,8 +73,7 @@ on its own GPU; the tasks read a copy of the config (`outputs/submitted_configs/
 `data/processed/chronicle_targets.txt`, read by `targets: all`). One preprocessing serves all targets
 (it has to be re-run once for pickles written before `--target` existed).
 Output in `outputs/chronicle/strats,...|target:<target>|train_frac:1.0|run:<r>o<n>/`: `log.txt`,
-`checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` and, for regression / binary targets,
-`predictions_test_all_days.csv`.
+`checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` and `predictions_test_all_days.csv`.
 
 ### Faster training
 - **Parallel runs.** `scripts/train_chronicle.sbatch` submits a SLURM job array: every (target, run)
@@ -159,8 +158,9 @@ The checkpoint with the best validation metric is kept (patience 10).
 patient and draw: `patient_id, draw, day, prediction` plus `time, event` (survival; `time` = remaining
 time in days) or `ground_truth` (regression / binary). `day` is the cut day. `prediction` is the risk
 score (survival), the predicted value (regression) or the logit (binary).
-`predictions_test_all_days.csv` (regression / binary) has the same columns with one row per patient
-and day (`draw` 0). Columns as in Chronicle's `predictions_test/<target>.parquet`, plus `draw`.
+`predictions_test_all_days.csv` (every target) has the same columns with one row per patient
+and day with a target (`draw` 0); `overall_evaluation.py` samples days from it, as Chronicle. Its metric is
+logged for regression / binary targets only (a C-index over every day of every patient is not Chronicle's). Columns as in Chronicle's `predictions_test/<target>.parquet`, plus `draw`.
 As in Chronicle, regression `prediction` and `ground_truth` are mapped back to the original units
 (e.g. g/dL) with Chronicle's label scaler of the target, which `preprocess_chronicle.py` copies from
 `<chronicle dir>/scalers/label_scalers.pkl` to `data/processed/chronicle_label_scalers.pkl`; the
@@ -182,8 +182,8 @@ regression target also its label scaler), then the STraTS normalization of the t
 next to `checkpoint_best.bin`. Variables the model was not trained on are dropped; a missing static
 variable is filled with the training mean. The metric is computed over `num_eval_draws` random cut days
 per patient, as for the test split, and for regression / binary targets also over every day with a
-target. Output: `log.txt`, `predictions_external.csv` (columns as `predictions_test.csv`) and, for
-regression / binary targets, `predictions_external_all_days.csv`. Regression predictions are saved in
+target. Output: `log.txt`, `predictions_external.csv` (columns as `predictions_test.csv`) and
+`predictions_external_all_days.csv` (every day with a target). Regression predictions are saved in
 the original units, with the label scaler from `scaler_dir` (or, with `scaler_dir: null`, the one
 saved in `inference.pkl`; runs from before this have none and stay in the scaled units).
 
