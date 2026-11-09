@@ -38,9 +38,21 @@ TARGET=label_supportive_care_transfusion_7_days RUN=2o5 sbatch train_chronicle.s
   erste Zeile nennt Target und Run.
 - **Ergebnisse** liegen in
   `outputs/chronicle/strats,…|target:<TARGET>|train_frac:1.0|run:<r>o<n>/`: `log.txt`,
-  `checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` und bei Regression/Binär
-  zusätzlich `predictions_test_all_days.csv`. Das Endergebnis steht in `log.txt` unter
-  `Test res of the best checkpoint` (bei Regression/Binär zusätzlich `…, all days with a target`).
+  `checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` (die 10 gezogenen Tage pro
+  Patient) und `predictions_test_all_days.csv` (alle Tage mit Target). Das Endergebnis steht in
+  `log.txt` unter `Test res of the best checkpoint` (bei Regression/Binär zusätzlich
+  `…, all days with a target`).
+- **Overall-Evaluation wie Chronicle** (C-Index für OS/TTNT, AUROC für die 6 Labs, Transfusion
+  und febrile Neutropenie, gleiche Schwellen, 50 Ziehungen mit Seed 42 wie Chronicles
+  `overall_evaluation.py`):
+  ```bash
+  cd src && python overall_evaluation.py --cohort <kohorten_ordner>   # liest ../outputs/chronicle
+  ```
+  `<kohorten_ordner>/<ordnername>.csv` ist die rohe Kohorten-CSV (Geschlecht für AST/ALT/Kreatinin).
+  Ergebnis: eine Zeile pro Lauf in `outputs/chronicle/overall_evaluation.csv`. Die Werte weichen
+  leicht vom Log ab (dort 10 Ziehungen mit Seed 2023). Läufe von vor dieser Änderung haben für
+  Survival keine `predictions_test_all_days.csv`; dann werden die gezogenen Tage aus
+  `predictions_test.csv` verwendet (mit Warnung, nicht ganz vergleichbar).
 - **Vorhersagedateien wie bei Chronicle:** Spalten `patient_id, draw, day, prediction` plus
   `time, event` (Survival) bzw. `ground_truth` (Regression/Binär). Bei Regression stehen
   `prediction` und `ground_truth` in **Originaleinheiten** (z. B. g/dL). Zurückgerechnet wird mit
@@ -130,8 +142,10 @@ vektorisierte Variable-Dropout-Schleife in `modeling_strats.py` (gleiches Ergebn
 - Checkpoint-Auswahl mit `--dataset chronicle`: Validierungsmetrik des Targets (`c_index`,
   `correlation` oder `auc`) statt `auprc+auroc`. Patience und Early Stopping sind wie im Original.
 - Am Ende (nur Chronicle): Der beste Checkpoint wird geladen, auf test ausgewertet und als
-  `predictions_test.csv` gespeichert. Bei Regression/Binär wird zusätzlich auf allen Tagen mit
-  Target ausgewertet (`predictions_test_all_days.csv`). Wird test nicht während des Trainings
+  `predictions_test.csv` gespeichert. Zusätzlich werden die Vorhersagen für alle Tage mit
+  Target gespeichert (`predictions_test_all_days.csv`). Bei Regression/Binär steht deren Metrik
+  auch im Log, bei Survival nicht (ein C-Index über alle Tage aller Patienten ist nicht der von
+  Chronicle). Daraus rechnet `overall_evaluation.py`. Wird test nicht während des Trainings
   ausgewertet, verweist die Zeile `Final test res` darauf.
 
 **`src/models.py`**
@@ -163,6 +177,7 @@ vektorisierte Variable-Dropout-Schleife in `modeling_strats.py` (gleiches Ergebn
 | `src/preprocess_chronicle.py` | Chronicle-CSVs (`*_{train,val,test}.csv`) → `data/processed/chronicle.pkl` = `[data, oc, train_ids, val_ids, test_ids]`. `data`: ein Triplet (`ts_id, day, variable, value`) pro Beobachtung, nur Features aus dem Schema. `oc`: pro Patient und Tag alle Targets, aus der ersten Zeile des Tages. Kopiert außerdem `scalers/label_scalers.pkl` nach `data/processed/chronicle_label_scalers.pkl`. |
 | `src/dataset_chronicle.py` | Dataset: Historie bis zu einem Schnitt-Tag, Label des gewählten Targets an diesem Tag, Normalisierung, Batches |
 | `src/evaluator_survival.py` | Metrik je Target-Typ (C-Index / Pearson r / ROC AUC), Mittel ± Std über die Ziehungen (auf skalierten Werten), Speichern der Vorhersagen (Regression in Originaleinheiten, wie Chronicle) |
+| `src/overall_evaluation.py` | C-Index / AUROC aller Läufe in `outputs/chronicle` wie Chronicles `overall_evaluation.py` (gleiche Schwellen, 50 Ziehungen, Seed 42) → `overall_evaluation.csv` |
 | `src/external_validation.py`, `external_validation.yaml`, `external_validation.sbatch` | Inference eines trainierten Modells auf einer externen Kohorte |
 | `preprocess_chronicle.sbatch` | SLURM: Preprocessing (CPU) |
 | `train_chronicle.sbatch` | SLURM: ein Lauf (`TARGET`, `RUN`), eine GPU |

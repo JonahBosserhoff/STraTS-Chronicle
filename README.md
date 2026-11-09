@@ -2,6 +2,17 @@
 This repo contains an official re-implementation of STraTS in pytorch. <br>
 Paper: https://arxiv.org/pdf/2107.14293.pdf
 
+## Quick start: Chronicle runs
+Run from the repo root. By default, every label is trained 5 times with different seeds on the same splits.
+```bash
+# Start labels: all labels (read from the newest preprocessing log), or only specific ones
+grep -h "Targets (choose" "$(ls -t strats_prep-*.out | head -1)" | grep -oE "'[^']+'" | tr -d "'" | xargs ./submit_chronicle.sh
+./submit_chronicle.sh OS TTNT label_min_lab_hemoglobin_60_days
+
+# Start only one run per label instead of 5: put NUM_RUNS=1 in front (at most 8 parallel GPUs here)
+NUM_RUNS=1 MAX_PARALLEL=8 ./submit_chronicle.sh OS TTNT label_min_lab_hemoglobin_60_days
+```
+
 ## Important changes
 - We included implementations for the following models: [STraTS](https://arxiv.org/pdf/2107.14293.pdf), [GRU-D](https://arxiv.org/pdf/1606.01865.pdf), [InterpNet](https://openreview.net/pdf?id=r1efr3C9Ym), GRU, [TCN](https://arxiv.org/pdf/1803.01271.pdf), [SaND](https://dl.acm.org/doi/pdf/10.5555/3504035.3504536)
 - For STraTS, we removed LayerNorm and replaced ReLU activations in the FFN with GELU, as this improved the performance.
