@@ -14,6 +14,8 @@ Output: ../data/processed/chronicle.pkl = [data, oc, train_ids, val_ids, test_id
                                           survival targets (OS, TTNT, ...) and the label_*
                                           columns. The target to train on is chosen in
                                           main.py (--target), so one preprocessing serves all.
+        ../data/processed/chronicle_targets.txt  the names of these targets, one per line
+                                          ("targets: all" in the training / ablation config)
 The targets of a day are taken from its first row, as Chronicle's <CLS> token of that day
 copies the labels of the day's first observation (they are constant within a day).
 
@@ -39,6 +41,24 @@ def target_columns(columns):
     survival_cols = {c for cols in targets.values() for c in cols}
     targets.update({c:[c] for c in columns if c.startswith('label') and c not in survival_cols})
     return targets
+
+
+def targets_path(pkl_path):
+    """The list of the cohort's targets, written next to the pickle (one name per line)."""
+    return os.path.splitext(pkl_path)[0]+'_targets.txt'
+
+
+def cohort_targets(pkl_path='../data/processed/chronicle.pkl'):
+    """Every target of the preprocessed cohort, in the order preprocess_chronicle.py prints them: from the
+    list next to the pickle, or (pickles from before that list was written) from the pickle itself."""
+    path = targets_path(pkl_path)
+    if os.path.isfile(path):
+        with open(path) as f:
+            return [line.strip() for line in f if line.strip()]
+    assert os.path.isfile(pkl_path), pkl_path+' not found: run preprocess_chronicle.py first'
+    with open(pkl_path, 'rb') as f:
+        oc = pickle.load(f)[1]
+    return list(target_columns(oc.columns))
 
 
 def to_strats(df):
@@ -88,6 +108,10 @@ if __name__ == '__main__':
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     pickle.dump([data, oc, split_ids['train'], split_ids['val'], split_ids['test']], open(args.out, 'wb'))
     print('Saved', args.out)
+    # for "targets: all" in configs/train_chronicle.yaml and configs/ablation.yaml
+    with open(targets_path(args.out), 'w') as f:
+        f.write(''.join(t+'\n' for t in target_columns(oc.columns)))
+    print('Saved', targets_path(args.out))
 
     # Chronicle's label scalers of this cohort, to save regression predictions in the original
     # units (a copy left over from another cohort is removed)

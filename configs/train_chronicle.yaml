@@ -1,0 +1,40 @@
+# Training of STraTS on the Chronicle cohort (data/processed/chronicle.pkl from scripts/preprocess_chronicle.sbatch).
+# Every target x run is one run of src/main.py on its own GPU (SLURM array). From the repo root:
+#   bash scripts/train_chronicle.sbatch                     # submits all runs of this config
+#   bash scripts/train_chronicle.sbatch --list              # only shows the runs, submits nothing
+#   CONFIG=configs/other.yaml bash scripts/train_chronicle.sbatch
+
+# Targets (labels): "all" = every target of the cohort (as printed by the preprocessing), or a list, e.g.
+#   targets: [OS, TTNT, label_min_lab_hemoglobin_60_days]
+targets: all
+
+# Runs per target: the same splits, a different training seed per run (--run <r>o<num_runs>, seed = seed + r).
+# This is not a 5-fold cross-validation: the train/val/test patients are those of chronicle-preprocess.
+# num_runs: 1 = one run per target (run:1o1).
+num_runs: 5
+# only some of these runs, e.g. [1] or [2, 5] (to repeat failed runs); null = all runs 1..num_runs
+runs: null
+
+# at most this many runs (GPUs) at the same time
+max_parallel: 4
+
+# Arguments of src/main.py (--<name> <value>; null = default of main.py). Hyperparameters of the STraTS (ss-) runs
+# of the original run_main.sh. dataset, target, run and train_frac (1.0) are set by scripts/train_chronicle.sbatch.
+hyperparameters:
+  model_type: strats
+  hid_dim: 64
+  num_layers: 2
+  num_heads: 16
+  dropout: 0.2
+  attention_dropout: 0.2
+  lr: 0.0005
+  max_epochs: 50
+  patience: 10
+  train_batch_size: 16
+  eval_batch_size: 32
+  max_obs: 880
+  num_eval_draws: 10
+  seed: 2023
+  # test is evaluated once with the best checkpoint at the end, not at every validation: same checkpoint and
+  # test result, ~20% less time per epoch ("eval_train,test" = also test at every validation)
+  eval_during_training: eval_train

@@ -2,5 +2,9 @@
 data/
 outputs/
 .DS_Store
+# SLURM logs
 strats_os-*.out
 strats_chronicle-*.out
+strats_prep-*.out
+strats_ext-*.out
+strats_ablation-*.out

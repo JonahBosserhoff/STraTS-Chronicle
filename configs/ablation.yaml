@@ -1,0 +1,36 @@
+# Feature ablation of the trained STraTS Chronicle models (inference on the test split only; details in the header
+# of src/ablation.py). From the repo root:
+#   sbatch scripts/ablation.sbatch                         # all models in one job
+#   sbatch --array=0-3 scripts/ablation.sbatch             # the models split over 4 jobs (GPUs)
+#   CONFIG=configs/other.yaml sbatch scripts/ablation.sbatch
+# Relative paths are relative to src/.
+
+# training run folders (as written by scripts/train_chronicle.sbatch)
+results_dir: ../outputs/chronicle
+
+# Targets (labels): "all" = every target of the cohort, or a list. A target without a finished run in results_dir is
+# skipped (listed in the log).
+targets: all
+# runs per target: null = every run found (e.g. 1o5 ... 5o5), or a list of run tags, e.g. ["1o5"]
+runs: null
+
+# percent of all features masked. Every percentage is drawn anew (independently of the other percentages), with the
+# same masked features for every model. 0 reproduces the test result of the training run.
+percentages: [10, 20, 30, 40, 50, 60, 70, 80, 90]
+# independent random feature sets per percentage (1 = one per percentage)
+num_mask_draws: 1
+# also mask the static features age_at_diagnosis and gender_female (masked = training mean); false = time-series
+# features only
+include_static: true
+# seed of the feature draws
+seed: 2023
+
+eval_batch_size: 32
+# save the predictions of every percentage (as predictions_test*.csv of a training run)
+save_predictions: true
+# Cohort directory with <name of the directory>.csv (raw cohort CSV, for the sex): additionally scores the predictions
+# as src/overall_evaluation.py (C-index for OS / TTNT, AUROC with Chronicle's thresholds for the labs, ...).
+# null = only the metrics of the training log (C-index / Pearson r / ROC AUC).
+cohort: null
+
+output_dir: ../outputs/chronicle_ablation/

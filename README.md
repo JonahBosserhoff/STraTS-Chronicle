@@ -3,15 +3,15 @@ This repo contains an official re-implementation of STraTS in pytorch. <br>
 Paper: https://arxiv.org/pdf/2107.14293.pdf
 
 ## Quick start: Chronicle runs
-Run from the repo root. By default, every label is trained 5 times with different seeds on the same splits.
+Run from the repo root. Settings are in `configs/`, SLURM scripts in `scripts/`.
 ```bash
-# Start labels: all labels (read from the newest preprocessing log), or only specific ones
-grep -h "Targets (choose" "$(ls -t strats_prep-*.out | head -1)" | grep -oE "'[^']+'" | tr -d "'" | xargs ./submit_chronicle.sh
-./submit_chronicle.sh OS TTNT label_min_lab_hemoglobin_60_days
-
-# Start only one run per label instead of 5: put NUM_RUNS=1 in front (at most 8 parallel GPUs here)
-NUM_RUNS=1 MAX_PARALLEL=8 ./submit_chronicle.sh OS TTNT label_min_lab_hemoglobin_60_days
+CHRONICLE_DATA_DIR=<chronicle-preprocess output dir> GLOBAL_FORMAT=<schema csv> sbatch scripts/preprocess_chronicle.sbatch
+bash scripts/train_chronicle.sbatch          # configs/train_chronicle.yaml: targets, runs per target, hyperparameters
+sbatch scripts/external_validation.sbatch    # configs/external_validation.yaml
+sbatch scripts/ablation.sbatch               # configs/ablation.yaml: feature ablation of the trained models
 ```
+By default (`targets: all`, `num_runs: 5`) every label is trained 5 times with different seeds on the same
+splits; `num_runs: 1` trains one run per label.
 
 ## Important changes
 - We included implementations for the following models: [STraTS](https://arxiv.org/pdf/2107.14293.pdf), [GRU-D](https://arxiv.org/pdf/1606.01865.pdf), [InterpNet](https://openreview.net/pdf?id=r1efr3C9Ym), GRU, [TCN](https://arxiv.org/pdf/1803.01271.pdf), [SaND](https://dl.acm.org/doi/pdf/10.5555/3504035.3504536)
@@ -59,26 +59,29 @@ uses the STraTS defaults.
 ### Run
 From the repo root (SLURM):
 ```
-CHRONICLE_DATA_DIR=<chronicle-preprocess output dir> GLOBAL_FORMAT=<schema csv> sbatch preprocess_chronicle.sbatch
+CHRONICLE_DATA_DIR=<chronicle-preprocess output dir> GLOBAL_FORMAT=<schema csv> sbatch scripts/preprocess_chronicle.sbatch
 
-sbatch train_chronicle.sbatch                                          # one run, OS
-TARGET=label_min_lab_hemoglobin_60_days sbatch train_chronicle.sbatch  # one run, another target
-
-./submit_chronicle.sh OS TTNT label_min_lab_hemoglobin_60_days         # in parallel: 5 runs per target
-NUM_RUNS=1 MAX_PARALLEL=8 ./submit_chronicle.sh OS TTNT                # 1 run per target, up to 8 GPUs
+bash scripts/train_chronicle.sbatch --list   # the runs of configs/train_chronicle.yaml, nothing is submitted
+bash scripts/train_chronicle.sbatch          # submits them (with bash, not sbatch: it sets the array size)
+CONFIG=configs/other.yaml bash scripts/train_chronicle.sbatch
 ```
-`preprocess_chronicle.py` prints the targets of the cohort. One preprocessing serves all targets
+`configs/train_chronicle.yaml` sets the targets (`all` or a list), the runs per target (`num_runs`; the
+runs differ only in the training seed, the splits are the same), `max_parallel` (GPUs at a time) and
+the arguments of `src/main.py` (`hyperparameters`). Every target x run is one task of a SLURM job array
+on its own GPU; the tasks read a copy of the config (`outputs/submitted_configs/`).
+`preprocess_chronicle.py` prints the targets of the cohort (and writes them to
+`data/processed/chronicle_targets.txt`, read by `targets: all`). One preprocessing serves all targets
 (it has to be re-run once for pickles written before `--target` existed).
 Output in `outputs/chronicle/strats,...|target:<target>|train_frac:1.0|run:<r>o<n>/`: `log.txt`,
 `checkpoint_best.bin`, `inference.pkl`, `predictions_test.csv` and, for regression / binary targets,
 `predictions_test_all_days.csv`.
 
 ### Faster training
-- **Parallel runs.** `submit_chronicle.sh` submits `train_chronicle_array.sbatch` as a SLURM job
-  array: every (target, run) is an independent job on its own GPU, at most `MAX_PARALLEL` at a time,
-  so 5 seeds take as long as one. Task `i` trains target `i / NUM_RUNS` with `--run (i % NUM_RUNS + 1)o<NUM_RUNS>`;
-  runs differ only in the training seed, as `--run` in `run_main.sh`.
-- **No test evaluation every epoch.** Both sbatch scripts pass `--eval_during_training eval_train`:
+- **Parallel runs.** `scripts/train_chronicle.sbatch` submits a SLURM job array: every (target, run)
+  is an independent job on its own GPU, at most `max_parallel` at a time, so 5 seeds take as long as
+  one. Task `i` trains target `i / #runs` with run `i % #runs` (`--run <r>o<num_runs>`); runs differ
+  only in the training seed, as `--run` in `run_main.sh`.
+- **No test evaluation every epoch.** The training config sets `eval_during_training: eval_train`:
   during training only val (which selects the checkpoint) and eval_train are evaluated, and test once
   with the best checkpoint at the end. Evaluation draws no random numbers, so the training, the
   checkpoint and the test result are the same as with test evaluated at every validation (checked
@@ -97,8 +100,10 @@ Output in `outputs/chronicle/strats,...|target:<target>|train_frac:1.0|run:<r>o<
 | `src/models.py` | with `--dataset chronicle` the output head predicts the chosen target: Cox loss (survival), MSE (regression), BCE (binary) |
 | `src/main.py` | selects the above for `--dataset chronicle` (`--target`), selects the checkpoint by the validation metric, evaluates and saves the test predictions of the best checkpoint, `--eval_during_training`, falls back to CPU without CUDA |
 | `src/modeling_strats.py` | variable dropout vectorized (same result as the loop over all variables, which is slow with Chronicle's ~800 variables) |
-| `src/external_validation.py`, `external_validation.yaml` | new: inference of a trained model on an external cohort |
-| `preprocess_chronicle.sbatch`, `train_chronicle.sbatch`, `train_chronicle_array.sbatch`, `submit_chronicle.sh`, `external_validation.sbatch` | SLURM scripts |
+| `src/external_validation.py`, `configs/external_validation.yaml` | new: inference of a trained model on an external cohort |
+| `src/ablation.py`, `configs/ablation.yaml` | new: feature ablation of the trained models on the test split |
+| `src/train_chronicle.py`, `configs/train_chronicle.yaml` | new: training config -> one `main.py` call per target x run |
+| `scripts/preprocess_chronicle.sbatch`, `scripts/train_chronicle.sbatch`, `scripts/external_validation.sbatch`, `scripts/ablation.sbatch` | SLURM scripts |
 | `.gitignore` | `data/` and `outputs/` are not tracked |
 
 The original datasets and models (PhysioNet, MIMIC-III, GRU-D, ...) are unchanged.
@@ -165,9 +170,9 @@ metrics are computed on the scaled values, as in Chronicle. Without that file (o
 ### External validation
 Scores a trained model on an external cohort, without training:
 ```
-sbatch external_validation.sbatch      # or: cd src && python external_validation.py --config ../external_validation.yaml
+sbatch scripts/external_validation.sbatch      # or: cd src && python external_validation.py --config ../configs/external_validation.yaml
 ```
-`external_validation.yaml` sets the external cohort (raw, unscaled CSV in Chronicle's long format, like
+`configs/external_validation.yaml` sets the external cohort (raw, unscaled CSV in Chronicle's long format, like
 the input of `chronicle-preprocess`, with the target's columns), the Chronicle scalers of the training
 cohort (`scaler_dir`, or `null` if the cohort is already scaled with them), the training run
 (`model_dir`) and `output_dir`. The target is the one of the training run (runs from before `--target`
@@ -181,6 +186,26 @@ target. Output: `log.txt`, `predictions_external.csv` (columns as `predictions_t
 regression / binary targets, `predictions_external_all_days.csv`. Regression predictions are saved in
 the original units, with the label scaler from `scaler_dir` (or, with `scaler_dir: null`, the one
 saved in `inference.pkl`; runs from before this have none and stay in the scaled units).
+
+### Feature ablation
+Scores every trained model on the test split with a share of all features masked, without training:
+```
+sbatch scripts/ablation.sbatch                 # or: cd src && python ablation.py --config ../configs/ablation.yaml
+sbatch --array=0-3 scripts/ablation.sbatch     # the models split over 4 jobs (GPUs)
+```
+`configs/ablation.yaml` sets the training runs (`results_dir`), the targets (`all` or a list; a target
+without a finished run is skipped and logged), the percentages (default 10, 20, ..., 90) and `output_dir`.
+For each percentage p, round(p % x #features) features are drawn from every feature the model knows (its
+variable vocabulary and, with `include_static`, `age_at_diagnosis` / `gender_female`). Every percentage is
+drawn anew, independently of the others; the draw depends only on `seed`, p and the mask draw, so every
+model gets the same masked features at the same p (`masked_features.csv`). A masked time-series feature is
+removed from the test data (as if never recorded); a masked static feature is set to the training mean, as
+a missing one. Patients, cut days, normalization and metric are those of the test evaluation at the end of
+training (0 % reproduces "Test res of the best checkpoint"). A cut with no observation left is predicted
+from the static features alone (time-series embedding 0); their share is reported as `empty_frac`.
+Output: `ablation_results.csv` (metric per model, p and mask draw, as in the training log) and, with
+`cohort`, `ablation_overall_evaluation.csv` (metrics of `overall_evaluation.py`); details in the header of
+`src/ablation.py`.
 
 ### Differences to Chronicle
 - One target per model (single head); Chronicle trains all targets jointly (multi-task).

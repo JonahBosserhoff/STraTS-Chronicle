@@ -1,5 +1,7 @@
-# External validation of a trained STraTS Chronicle model (inference only):
-#   cd src && python external_validation.py --config ../external_validation.yaml
+# External validation of a trained STraTS Chronicle model (inference only). From the repo root:
+#   sbatch scripts/external_validation.sbatch
+#   CONFIG=configs/external_validation_site_b.yaml sbatch scripts/external_validation.sbatch
+# (or: cd src && python external_validation.py --config ../configs/external_validation.yaml)
 # Relative paths are relative to src/.
 
 # external cohort: raw (unscaled) CSV in Chronicle's long format, like the input of chronicle-preprocess

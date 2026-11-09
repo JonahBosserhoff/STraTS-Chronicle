@@ -11,7 +11,7 @@ scaler of the training cohort, as chronicle-preprocess does. The best checkpoint
 as the test split at the end of training: metric mean ± std over num_eval_draws random cut days
 per patient, and for a regression / binary target also over every day with a target.
 
-    cd src && python external_validation.py --config ../external_validation.yaml
+    cd src && python external_validation.py --config ../configs/external_validation.yaml
 
 Output in output_dir: log.txt and predictions_external.csv (columns as predictions_test.csv),
 for a regression / binary target also predictions_external_all_days.csv. Regression predictions
@@ -35,7 +35,7 @@ from utils import Logger
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--config', type=str, default='../external_validation.yaml')
+parser.add_argument('--config', type=str, default='../configs/external_validation.yaml')
 cfg = yaml.safe_load(open(parser.parse_args().config))
 
 # hyperparameters and training statistics of the training run
