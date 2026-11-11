@@ -133,6 +133,8 @@ class ChronicleDataset:
                     'variables':data.variable.unique()}
         self.norm = norm
         demo = demo.reindex(index=self.ts_ids, columns=STATIC_VARIS)
+        # which static features a patient has recorded (before mean filling): observations for ablation.py
+        self.demo_observed = demo.notna().to_numpy()
 
         self.demo = ((demo.fillna(norm['demo_mean'])-norm['demo_mean'])/norm['demo_std']).to_numpy()
         args.D = len(STATIC_VARIS)

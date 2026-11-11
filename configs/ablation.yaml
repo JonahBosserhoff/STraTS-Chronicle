@@ -14,8 +14,20 @@ targets: all
 # runs per target: null = every run found (e.g. 1o5 ... 5o5), or a list of run tags, e.g. ["1o5"]
 runs: null
 
-# percent of all features masked. Every percentage is drawn anew (independently of the other percentages), with the
-# same masked features for every model. 0 reproduces the test result of the training run.
+# Masked features from Chronicle's feature ablation, so that STraTS and Chronicle lose exactly the same features:
+# the folder with Chronicle's results, one dropped_features.csv per step (written by chronicle-evaluate ...
+# feature_ablation_percent=<p> feature_ablation_fold=<f> to its results_dir), at any depth, e.g.
+# <folder>/percent_10/fold_5/dropped_features.csv. Every file is one step (percentage and fold from the file, or from
+# the folder names percent_<p> / fold_<f> for a file without rows); the fold is the mask draw. num_mask_draws,
+# include_static and seed below are then not used.
+# null = draw the masked features here (percentages, num_mask_draws, include_static, seed).
+chronicle_ablation: null # e.g. /homes/jbosserhoff/Chronicle/runs/feature_ablation
+
+# percent of all features masked. 0 reproduces the test result of the training run.
+# Without chronicle_ablation: every percentage is drawn anew (independently of the other percentages), with the same
+# masked features for every model.
+# With chronicle_ablation: null = every step of Chronicle; a list = only the steps of these percentages (every fold;
+# 0 needs no Chronicle file).
 percentages: [10, 20, 30, 40, 50, 60, 70, 80, 90]
 # independent random feature sets per percentage (1 = one per percentage)
 num_mask_draws: 1
@@ -24,6 +36,8 @@ num_mask_draws: 1
 include_static: true
 # seed of the feature draws
 seed: 2023
+# Either way, a test patient without any observation left (every time-series feature and every recorded static
+# feature masked) is not scored, as in Chronicle.
 
 eval_batch_size: 32
 # save the predictions of every percentage (as predictions_test*.csv of a training run)

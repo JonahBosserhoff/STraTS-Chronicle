@@ -195,14 +195,20 @@ sbatch --array=0-3 scripts/ablation.sbatch     # the models split over 4 jobs (G
 ```
 `configs/ablation.yaml` sets the training runs (`results_dir`), the targets (`all` or a list; a target
 without a finished run is skipped and logged), the percentages (default 10, 20, ..., 90) and `output_dir`.
-For each percentage p, round(p % x #features) features are drawn from every feature the model knows (its
+With `chronicle_ablation` (the folder of Chronicle's feature ablation, e.g. `.../runs/feature_ablation`, with one
+`dropped_features.csv` of `chronicle-evaluate` per step, e.g. `percent_10/fold_5/dropped_features.csv`), every step
+masks exactly the features Chronicle removed in it (the fold is the mask draw; `percentages: null` = every step,
+a list = only those percentages). Without it (`null`):
+for each percentage p, round(p % x #features) features are drawn from every feature the model knows (its
 variable vocabulary and, with `include_static`, `age_at_diagnosis` / `gender_female`). Every percentage is
 drawn anew, independently of the others; the draw depends only on `seed`, p and the mask draw, so every
 model gets the same masked features at the same p (`masked_features.csv`). A masked time-series feature is
 removed from the test data (as if never recorded); a masked static feature is set to the training mean, as
 a missing one. Patients, cut days, normalization and metric are those of the test evaluation at the end of
-training (0 % reproduces "Test res of the best checkpoint"). A cut with no observation left is predicted
-from the static features alone (time-series embedding 0); their share is reported as `empty_frac`.
+training (0 % reproduces "Test res of the best checkpoint"), except that, as in Chronicle, a test patient without
+any observation left (every time-series feature and every recorded static feature masked) is not scored
+(`num_patients_dropped`). A cut with no observation left before it is predicted from the static features alone
+(time-series embedding 0); their share is reported as `empty_frac`.
 Output: `ablation_results.csv` (metric per model, p and mask draw, as in the training log) and, with
 `cohort`, `ablation_overall_evaluation.csv` (metrics of `overall_evaluation.py`); details in the header of
 `src/ablation.py`.

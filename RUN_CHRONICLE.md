@@ -104,6 +104,7 @@ maskiert ist (Default 10 %, 20 %, …, 90 %). Kein Training. Einstellungen in `c
 results_dir: ../outputs/chronicle      # Trainingsläufe
 targets: all                           # alle Labels der Kohorte, oder eine Liste
 runs: null                             # alle gefundenen Runs, oder z. B. ["1o5"]
+chronicle_ablation: null               # Ordner von Chronicles Feature-Ablation: dieselben Features maskieren
 percentages: [10, 20, 30, 40, 50, 60, 70, 80, 90]
 num_mask_draws: 1                      # >1: mehrere unabhängige Feature-Sets pro Prozentsatz
 include_static: true                   # age_at_diagnosis / gender_female mit maskieren
@@ -119,7 +120,18 @@ sbatch --array=0-3 scripts/ablation.sbatch      # auf 4 GPUs verteilt (gleicher 
 - **Welche Modelle:** Für jedes Label jeder fertige Lauf in `results_dir` (mit
   `checkpoint_best.bin`, `inference.pkl` und „Test res of the best checkpoint“ im Log). Ein Label
   ohne Modell wird übersprungen, ebenso ein unfertiger Lauf. Beides steht am Ende im Log.
-- **Welche Features:** Der Pool sind alle Features, die das Modell kennt: das Variablen-Vokabular
+- **Dieselben Features wie Chronicle:** Mit `chronicle_ablation` (z. B.
+  `/homes/jbosserhoff/Chronicle/runs/feature_ablation`) wird nichts gezogen. Jede
+  `dropped_features.csv` darunter (beliebig tief, z. B. `percent_10/fold_5/dropped_features.csv`, von
+  `chronicle-evaluate ... feature_ablation_percent=10 feature_ablation_fold=5`) ist eine Stufe, und
+  STraTS maskiert genau die Features, die Chronicle dort entfernt hat. Prozentsatz und Fold kommen aus
+  der Datei (bei einer leeren Datei aus den Ordnernamen `percent_<p>` / `fold_<f>`), der Fold wird
+  zum Mask-Draw (`mask10_draw5/`). `percentages: null` nimmt jede gefundene Stufe, eine Liste nur diese
+  Prozentsätze (0 braucht keine Datei). `num_mask_draws`, `include_static` und `seed` werden dann nicht
+  benutzt. Features, die das STraTS-Modell nicht kennt (z. B. nur außerhalb des Train-Splits
+  beobachtet), sind ohnehin nicht in seiner Eingabe. Sie werden geloggt (`in_model` = false in
+  `masked_features.csv`, `num_masked_unknown` in den Ergebnissen).
+- **Welche Features (ohne `chronicle_ablation`):** Der Pool sind alle Features, die das Modell kennt: das Variablen-Vokabular
   (jedes Zeitreihen-Feature des Train-Splits, gleich für alle Labels) plus, mit `include_static`, die
   beiden statischen Features. Davon werden round(p % × Anzahl) zufällig gezogen.
 - **Jeder Prozentsatz wird neu gezogen**, unabhängig von den anderen (die 20 % enthalten nicht die
@@ -134,6 +146,11 @@ sbatch --array=0-3 scripts/ablation.sbatch      # auf 4 GPUs verteilt (gleicher 
   `percentages` kommt exakt „Test res of the best checkpoint“ aus dem Trainingslog heraus. Wurden
   die Daten seit dem Training neu vorverarbeitet (andere Normalisierung), bricht die Ablation für
   dieses Modell mit Fehlermeldung ab.
+- **Patienten ohne Beobachtung:** Wie in Chronicle wird ein Test-Patient, dem keine einzige
+  Beobachtung bleibt, nicht ausgewertet. Das heißt: Alle seine Zeitreihen-Features sind maskiert, und
+  jedes dokumentierte statische Feature ist es auch, denn in Chronicle sind Alter und Geschlecht
+  Beobachtungen wie alle anderen. Die Anzahl steht in `num_patients_dropped`, die übrigen Patienten
+  behalten ihre Schnitt-Tage.
 - **Leere Historie:** Sind alle Features bis zum Schnitt-Tag maskiert, bleibt keine Beobachtung
   übrig. STraTS kann darüber nicht attenden. Diese Schnitte werden nur aus den statischen Features
   vorhergesagt (Zeitreihen-Embedding = 0). Ihr Anteil steht in der Spalte `empty_frac`.

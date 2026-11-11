@@ -11,31 +11,49 @@ such a run is skipped, as is an unfinished run; both are logged and listed at th
 Test data. The test split is built as at the end of training (main.py): same patients, same cut days (the run's
 seed and num_eval_draws), same normalization (checked against inference.pkl), same metric (mean ± std over the
 draws of cut days and, for regression / binary targets, over every day with a target; the predictions of every
-day are saved for every target). Only the input changes, so
-0 % reproduces "Test res of the best checkpoint" of the run.
+day are saved for every target). Only the input changes (and, as in Chronicle, the patients without any observation
+left), so 0 % reproduces "Test res of the best checkpoint" of the run.
 
-Masking. For every percentage p of the config and every mask draw, round(p % x #features) features are drawn at
-random from all features the model knows: its variable vocabulary (every time-series feature of the training set)
-and, with include_static, the static features age_at_diagnosis and gender_female.
-- Every percentage is drawn anew, independently of the other percentages (the 20 % features do not contain the
-  10 % ones). A draw depends only on seed, p and the mask draw (and the feature vocabulary), so every model (every
-  target and run) gets the same masked features at the same p and mask draw. num_mask_draws > 1 draws several
-  independent feature sets per p.
+Masked features, one of two sources:
+- chronicle_ablation: a path. The features Chronicle removed in its own feature ablation (chronicle-evaluate ...
+  feature_ablation_percent=<p> feature_ablation_fold=<f>, one <results_dir>/dropped_features.csv per step) are masked
+  here too, so STraTS and Chronicle lose exactly the same features. Every dropped_features.csv below the path (any
+  depth, e.g. <path>/percent_10/fold_5/dropped_features.csv) is one step: percentage and fold from its columns
+  ablation_percent and fold, or, for a file without rows (nothing removed), from the folder names percent_<p> and
+  fold_<f>. The fold becomes the mask draw (mask<p>_draw<fold>/). percentages: null = every step found, a list = only
+  those percentages (0 = nothing masked, needs no file). num_mask_draws, include_static and seed are not used. A
+  removed feature the model does not know (Chronicle's vocabulary also has features seen only outside the training
+  split, which STraTS drops) is not in the model's input anyway; it is listed (in_model false in
+  masked_features.csv, num_masked_unknown in the results).
+- chronicle_ablation: null. Drawn here: for every percentage p of the config and every mask draw, round(p % x
+  #features) features are drawn at random from all features the model knows: its variable vocabulary (every
+  time-series feature of the training set) and, with include_static, the static features age_at_diagnosis and
+  gender_female. Every percentage is drawn anew, independently of the other percentages (the 20 % features do not
+  contain the 10 % ones). A draw depends only on seed, p and the mask draw (and the feature vocabulary), so every
+  model (every target and run) gets the same masked features at the same p and mask draw. num_mask_draws > 1 draws
+  several independent feature sets per p.
+
+Masking.
 - A masked time-series feature is removed from the test data: none of its observations is seen, as if it had
   never been recorded (the max_obs most recent observations are taken from the remaining ones).
 - A masked static feature is set to the training mean, as a missing static feature is.
-- A cut whose history has no observation left (every feature observed up to the cut day masked) is predicted from
-  the static features alone, with the time-series embedding set to 0: STraTS cannot attend over an empty
-  sequence. Their share is reported (empty_frac).
+- A test patient without any observation left is not scored, as in Chronicle (ChronicleDataset.ablate_features):
+  every time-series observation masked and no static feature recorded that is not masked (in Chronicle the static
+  features are observations like any other). The number is reported (num_patients_dropped); the other patients keep
+  their cut days.
+- A cut whose history has no observation left (every feature observed up to the cut day masked, but the patient has
+  observations later or a static feature) is predicted from the static features alone, with the time-series
+  embedding set to 0: STraTS cannot attend over an empty sequence. Their share is reported (empty_frac).
 
 Output in output_dir:
     ablation_results.csv             one row per model, p and mask draw: metric, std, share of masked observations,
-                                     share of cuts without observations, ...
+                                     patients not scored, share of cuts without observations, source of the
+                                     masked features (mask_source: "drawn" or the Chronicle file), ...
     ablation_overall_evaluation.csv  with cohort: the metrics of overall_evaluation.py (C-index for OS / TTNT,
                                      AUROC with Chronicle's thresholds for the labs, ...) of the same predictions
     log.txt                          (log_task<i>.txt for SLURM array task i)
     <run folder>/                    per model: results.csv, overall_evaluation.csv, masked_features.csv
-                                     (p, mask_draw, feature), log.txt and, with save_predictions, one folder
+                                     (p, mask_draw, feature, in_model), log.txt and, with save_predictions, one folder
                                      mask<p>_draw<d>/ with predictions_test.csv and predictions_test_all_days.csv
                                      as in the training run folder
 The two CSVs in output_dir are merged from the per-model files of every model in output_dir: use a new output_dir
@@ -47,6 +65,7 @@ array task; every task writes its own models and merges the CSVs at its end (the
 import argparse
 import os
 import pickle
+import re
 import sys
 import traceback
 from fractions import Fraction
@@ -68,8 +87,11 @@ from utils import Logger
 
 FINISHED = 'Test res of the best checkpoint' # written by main.py after the final test evaluation
 RESULTS_NAME, OVERALL_NAME, MASKED_NAME = 'results.csv', 'overall_evaluation.csv', 'masked_features.csv'
-KEYS = ['results_dir', 'targets', 'runs', 'percentages', 'num_mask_draws', 'include_static', 'seed',
-        'eval_batch_size', 'save_predictions', 'cohort', 'output_dir']
+KEYS = ['results_dir', 'targets', 'runs', 'chronicle_ablation', 'percentages', 'num_mask_draws', 'include_static',
+        'seed', 'eval_batch_size', 'save_predictions', 'cohort', 'output_dir']
+# Chronicle's feature ablation (chronicle-evaluate, chronicle.cli.evaluate.ablate_features): one file per step
+CHRONICLE_NAME, CHRONICLE_COLUMNS = 'dropped_features.csv', ['fold', 'ablation_percent', 'feature']
+CHRONICLE_DIR = re.compile(r'^(?P<key>percent|fold)_(?P<value>[0-9]+(?:\.[0-9]+)?)$')
 
 
 def is_int(x):
@@ -90,8 +112,9 @@ def load_config(path):
     for k in ['results_dir', 'output_dir']:
         if not (isinstance(cfg[k], str) and cfg[k]):
             fail(k+' must be a path')
-    if cfg['cohort'] is not None and not (isinstance(cfg['cohort'], str) and cfg['cohort']):
-        fail('cohort must be null or a path')
+    for k in ['cohort', 'chronicle_ablation']:
+        if cfg[k] is not None and not (isinstance(cfg[k], str) and cfg[k]):
+            fail(k+' must be null or a path')
     targets = cfg['targets']
     if targets!='all' and not (isinstance(targets, list) and len(targets)>0
                                and all(isinstance(t, str) and t for t in targets) and len(set(targets))==len(targets)):
@@ -101,11 +124,16 @@ def load_config(path):
                                  and all(isinstance(r, str) and r for r in runs) and len(set(runs))==len(runs)):
         fail('runs must be null or a non-empty list of distinct run tags such as "1o5"')
     p = cfg['percentages']
-    if not (isinstance(p, list) and len(p)>0 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
-                                                     and 0<=x<=100 for x in p)):
-        fail('percentages must be a non-empty list of numbers from 0 to 100')
-    if len({Fraction(str(x)) for x in p})<len(p):
-        fail('percentages contains a percentage more than once')
+    if p is None:
+        if cfg['chronicle_ablation'] is None:
+            fail('percentages: null (every step of Chronicle) needs chronicle_ablation; without it, a list')
+    else:
+        if not (isinstance(p, list) and len(p)>0 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                                                         and 0<=x<=100 for x in p)):
+            fail('percentages must be a non-empty list of numbers from 0 to 100'
+                 +(' or null' if cfg['chronicle_ablation'] is not None else ''))
+        if len({Fraction(str(x)) for x in p})<len(p):
+            fail('percentages contains a percentage more than once')
     for k in ['num_mask_draws', 'eval_batch_size']:
         if not (is_int(cfg[k]) and cfg[k]>=1):
             fail(k+' must be an integer >= 1')
@@ -134,25 +162,101 @@ def draw_masked(pool, percentage, mask_draw, seed):
     return [pool[i] for i in sorted(chosen)]
 
 
+def as_number(x):
+    """A Fraction as int if whole, else float (10 rather than 10.0 in folder names and CSVs)."""
+    return int(x) if x.denominator==1 else float(x)
+
+
+def chronicle_steps(root, percentages):
+    """The steps of Chronicle's feature ablation below root: [{percentage, mask_draw (= Chronicle's fold), features
+    (the removed ones, as Chronicle wrote them), source (the file)}], sorted by percentage and fold. percentages: None
+    = every step found; a list = the steps of these percentages (each must have been run by Chronicle, except 0, a
+    step with nothing masked and no file)."""
+    root = Path(root)
+    if not root.is_dir():
+        raise SystemExit('chronicle_ablation '+str(root)+' does not exist')
+    files = sorted(root.rglob(CHRONICLE_NAME))
+    if not files:
+        raise SystemExit('chronicle_ablation '+str(root)+': no '+CHRONICLE_NAME+' below it (written by '
+                         'chronicle-evaluate ... feature_ablation_percent=<p> feature_ablation_fold=<f>)')
+    steps = {}
+    for path in files:
+        def fail(message):
+            raise SystemExit(str(path)+': '+message)
+        df = pd.read_csv(path)
+        if missing := [c for c in CHRONICLE_COLUMNS if c not in df.columns]:
+            fail('no column(s) '+str(missing)+' (expected '+str(CHRONICLE_COLUMNS)+', as chronicle-evaluate writes)')
+        from_dirs = {}
+        for part in path.relative_to(root).parent.parts:
+            if m := CHRONICLE_DIR.match(part):
+                from_dirs[m['key']] = Fraction(m['value'])
+        from_csv = {}
+        for col, key in [('ablation_percent', 'percent'), ('fold', 'fold')]:
+            values = df[col].dropna().unique()
+            if len(values)>1:
+                fail('more than one '+col+': '+str(sorted(values)))
+            if len(values)==1:
+                from_csv[key] = Fraction(str(values[0]))
+        step = {}
+        for key in ['percent', 'fold']:
+            if key in from_csv and key in from_dirs and from_csv[key]!=from_dirs[key]:
+                fail(key+' '+str(as_number(from_csv[key]))+' in the file, but the folder name says '
+                     +str(as_number(from_dirs[key])))
+            if key not in from_csv and key not in from_dirs:
+                fail('no '+key+': neither in the file (no rows) nor in a folder name '+key+'_<number>')
+            step[key] = from_csv.get(key, from_dirs.get(key))
+        percent, fold = step['percent'], step['fold']
+        if not (0<percent<100 and fold.denominator==1 and fold>=0):
+            fail('percent '+str(as_number(percent))+', fold '+str(as_number(fold))
+                 +': expected 0 < percent < 100 and an integer fold >= 0')
+        features = df['feature'].astype(str).tolist()
+        if len(set(features))<len(features):
+            fail('a feature occurs more than once')
+        key = (percent, int(fold))
+        if key in steps:
+            fail('percent '+str(as_number(percent))+', fold '+str(int(fold))+' also in '+str(steps[key]['source']))
+        steps[key] = {'percentage':as_number(percent), 'mask_draw':int(fold), 'features':features, 'source':path}
+    if percentages is not None:
+        wanted = {Fraction(str(p)) for p in percentages}
+        found = {p for p, _ in steps}
+        if missing := sorted(wanted-found-{0}):
+            raise SystemExit('percentages '+str([as_number(p) for p in missing])+' are not in chronicle_ablation '
+                             +str(root)+', which has '+str([as_number(p) for p in sorted(found)]))
+        steps = {k:s for k,s in steps.items() if k[0] in wanted}
+        if 0 in wanted:
+            steps[(Fraction(0), 0)] = {'percentage':0, 'mask_draw':0, 'features':[], 'source':None}
+    return [steps[k] for k in sorted(steps)]
+
+
 class MaskedDataset:
     """The test split of a ChronicleDataset with some features masked; everything else is the dataset's own (same
-    patients, cut days, draws of cut days, labels). Only get_batch reads the observations."""
+    cut days, draws of cut days, labels), except that, as in Chronicle, a test patient without any observation left
+    is not scored. Only get_batch reads the observations."""
     def __init__(self, dataset, masked):
         masked = set(masked)
         var_to_ind = {v:i for i,v in enumerate(dataset.norm['variables'])}
         masked_ind = np.array(sorted(var_to_ind[v] for v in masked if v in var_to_ind), dtype=np.int64)
         masked_static = [j for j,v in enumerate(STATIC_VARIS) if v in masked]
+        kept_static = [j for j in range(len(STATIC_VARIS)) if j not in masked_static]
         assert len(masked_ind)+len(masked_static)==len(masked), 'Masked features the model does not know'
         self.__dict__.update(dataset.__dict__)
         self.days, self.times, self.values, self.varis = (list(x) for x in
                                                           [dataset.days, dataset.times, dataset.values, dataset.varis])
+        test = np.asarray(dataset.splits['test'])
+        scored = np.ones(len(test), dtype=bool)
         num_obs, num_kept = 0, 0
-        for i in dataset.splits['test']:
+        for k, i in enumerate(test):
             keep = ~np.isin(dataset.varis[i], masked_ind)
             for name in ['days', 'times', 'values', 'varis']:
                 getattr(self, name)[i] = getattr(dataset, name)[i][keep]
             num_obs, num_kept = num_obs+len(keep), num_kept+int(keep.sum())
+            # Chronicle leaves out a patient with no observation left; its static features are observations too
+            scored[k] = bool(keep.any()) or bool(dataset.demo_observed[i, kept_static].any())
         self.obs_masked_frac = 1-num_kept/num_obs if num_obs>0 else np.nan
+        # new dicts: the dataset's own splits and draws stay as they are for the next mask
+        self.splits = {**dataset.splits, 'test':[int(i) for i in test[scored]]}
+        self.eval_cuts = {**dataset.eval_cuts, 'test':[cuts[scored] for cuts in dataset.eval_cuts['test']]}
+        self.num_patients_dropped = int((~scored).sum())
         # a masked static feature = the training mean = 0 after normalization, as a missing one
         self.demo = dataset.demo.copy()
         self.demo[:, masked_static] = 0.0
@@ -247,8 +351,10 @@ def merge(output_dir, name, out_name):
 
 
 class Ablation:
-    def __init__(self, cfg, logger, device, overall_tasks):
+    def __init__(self, cfg, logger, device, overall_tasks, chronicle=None):
+        """chronicle: the steps of Chronicle's feature ablation (chronicle_steps), or None to draw the features."""
         self.cfg, self.logger, self.device, self.overall_tasks = cfg, logger, device, overall_tasks
+        self.chronicle = chronicle
         self.dataset, self.dataset_key = None, None
 
     def get_dataset(self, args):
@@ -297,58 +403,82 @@ class Ablation:
                               'saved it): overall_evaluation.py of the training run uses its drawn days, the ablation '
                               'every day')
         scaled_units = saved_in_scaled_units(run_dir)
-        pool = list(dataset.norm['variables'])+(STATIC_VARIS if cfg['include_static'] else [])
-        assert len(set(pool))==len(pool), 'Feature names occur more than once'
+        known = list(dataset.norm['variables'])+STATIC_VARIS # every feature the model knows
+        assert len(set(known))==len(known), 'Feature names occur more than once'
+        if self.chronicle is not None: # Chronicle's removed features, the same for every model
+            pool, steps = known, self.chronicle
+        else:
+            pool = list(dataset.norm['variables'])+(STATIC_VARIS if cfg['include_static'] else [])
+            steps = [{'percentage':p, 'mask_draw':mask_draw, 'features':draw_masked(pool, p, mask_draw, cfg['seed']),
+                      'source':None}
+                     for p in cfg['percentages'] for mask_draw in range(1, cfg['num_mask_draws']+1)]
         overall = self.overall_tasks.get(target)
         if self.overall_tasks and overall is None:
             args.logger.write('No overall evaluation for '+target+' (not one of the labels of overall_evaluation.py)')
 
-        test_ind = np.asarray(dataset.splits['test'])
         rows, overall_rows, masked_rows = [], [], []
-        for p in cfg['percentages']:
-            for mask_draw in range(1, cfg['num_mask_draws']+1):
-                masked = draw_masked(pool, p, mask_draw, cfg['seed'])
-                masked_rows += [{'percentage':p, 'mask_draw':mask_draw, 'feature':f} for f in masked]
-                write_csv(masked_rows, out_dir/MASKED_NAME)
-                data = MaskedDataset(dataset, masked)
-                args.logger.write('\n'+target+', run '+run+': '+str(p)+' % masked (mask draw '+str(mask_draw)+'): '
-                                  +str(len(masked))+' of '+str(len(pool))+' features ('+str(data.num_masked_static)
-                                  +' static), '+str(data.obs_masked_frac)+' of the test observations')
-                step_dir = out_dir/('mask'+format(p, 'g')+'_draw'+str(mask_draw))
-                if cfg['save_predictions']:
-                    step_dir.mkdir(exist_ok=True)
-                    for name in [DRAWS_NAME, ALL_DAYS_NAME]: # of an earlier ablation of this run
-                        if (step_dir/name).exists():
-                            (step_dir/name).unlink()
-                    with open(step_dir/'log.txt', 'w') as f: # overall_evaluation.py reads the units from here
-                        f.write(str(p)+' % of the features masked (mask draw '+str(mask_draw)+'), model '+str(run_dir)
-                                +'\n'+('WARNING: '+SCALED_UNITS_WARNING+' (as in the training run)\n' if scaled_units else ''))
-                save = (lambda name:str(step_dir/name)) if cfg['save_predictions'] else (lambda name:None)
-                res = evaluator.evaluate(model, data, 'test', train_step=None, save_path=save(DRAWS_NAME))
-                row = {'target':target, 'target_type':args.target_type, 'run':run, 'run_dir':run_dir.name,
-                       'percentage':p, 'mask_draw':mask_draw, 'num_features':len(pool),
-                       'num_masked':len(masked), 'num_masked_static':data.num_masked_static,
-                       'obs_masked_frac':data.obs_masked_frac, 'metric':evaluator.metric,
-                       'value':res[evaluator.metric], 'std':res[evaluator.metric+'_std'],
-                       'empty_frac':np.mean([data.empty_frac(test_ind, cuts) for cuts in dataset.eval_cuts['test']])}
-                res_all = evaluator.evaluate(model, data, 'test', train_step=None, all_days=True,
-                                             save_path=save(ALL_DAYS_NAME))
-                # the metric over all days for regression / binary only, as main.py logs it (a C-index over every
-                # day of every patient is not Chronicle's C-index)
-                row.update({'value_all_days':res_all[evaluator.metric] if args.target_type!='survival' else np.nan,
-                            'empty_frac_all_days':data.empty_frac(*dataset.all_cuts('test'))})
-                args.logger.write('Test res: '+str(row))
-                rows.append(row)
+        for step in steps:
+            p, mask_draw, features = step['percentage'], step['mask_draw'], step['features']
+            in_model = set(known)
+            masked = [f for f in features if f in in_model]
+            unknown = [f for f in features if f not in in_model]
+            source = 'drawn' if step['source'] is None else str(step['source'])
+            masked_rows += [{'percentage':p, 'mask_draw':mask_draw, 'feature':f, 'in_model':f in in_model}
+                            for f in features]
+            write_csv(masked_rows, out_dir/MASKED_NAME)
+            data = MaskedDataset(dataset, masked)
+            num_scored = len(data.splits['test'])
+            args.logger.write('\n'+target+', run '+run+': '+str(p)+' % masked (mask draw '+str(mask_draw)+', '+source
+                              +'): '+str(len(masked))+' of '+str(len(pool))+' features ('+str(data.num_masked_static)
+                              +' static), '+str(data.obs_masked_frac)+' of the test observations; '
+                              +str(data.num_patients_dropped)+' test patients without any observation left, not scored'
+                              +(('; '+str(len(unknown))+' removed features the model does not know (not in its input '
+                                 'anyway): '+str(unknown)) if unknown else ''))
+            row = {'target':target, 'target_type':args.target_type, 'run':run, 'run_dir':run_dir.name,
+                   'percentage':p, 'mask_draw':mask_draw, 'mask_source':source, 'num_features':len(pool),
+                   'num_masked':len(masked), 'num_masked_static':data.num_masked_static,
+                   'num_masked_unknown':len(unknown), 'obs_masked_frac':data.obs_masked_frac,
+                   'num_patients':num_scored, 'num_patients_dropped':data.num_patients_dropped,
+                   'metric':evaluator.metric}
+            if num_scored==0:
+                args.logger.write('WARNING: no test patient has an observation left, nothing scored')
+                rows.append({**row, 'value':np.nan, 'std':np.nan, 'empty_frac':np.nan, 'value_all_days':np.nan,
+                             'empty_frac_all_days':np.nan})
                 write_csv(rows, out_dir/RESULTS_NAME)
-                if overall is not None:
-                    label, metric, definition, score = overall
-                    path = predictions_path(step_dir)
-                    assert path is not None
-                    overall_rows.append({'label':label, 'target':target, 'metric':metric, 'definition':definition,
-                                         'run':run, 'run_dir':run_dir.name, 'percentage':p, 'mask_draw':mask_draw,
-                                         'predictions':path.name, **score(path)})
-                    args.logger.write('Overall evaluation: '+str(overall_rows[-1]))
-                    write_csv(overall_rows, out_dir/OVERALL_NAME)
+                continue
+            step_dir = out_dir/('mask'+format(p, 'g')+'_draw'+str(mask_draw))
+            if cfg['save_predictions']:
+                step_dir.mkdir(exist_ok=True)
+                for name in [DRAWS_NAME, ALL_DAYS_NAME]: # of an earlier ablation of this run
+                    if (step_dir/name).exists():
+                        (step_dir/name).unlink()
+                with open(step_dir/'log.txt', 'w') as f: # overall_evaluation.py reads the units from here
+                    f.write(str(p)+' % of the features masked (mask draw '+str(mask_draw)+', '+source+'), model '
+                            +str(run_dir)+'\n'
+                            +('WARNING: '+SCALED_UNITS_WARNING+' (as in the training run)\n' if scaled_units else ''))
+            save = (lambda name:str(step_dir/name)) if cfg['save_predictions'] else (lambda name:None)
+            res = evaluator.evaluate(model, data, 'test', train_step=None, save_path=save(DRAWS_NAME))
+            test_ind = np.asarray(data.splits['test']) # the scored patients
+            row.update({'value':res[evaluator.metric], 'std':res[evaluator.metric+'_std'],
+                        'empty_frac':np.mean([data.empty_frac(test_ind, cuts) for cuts in data.eval_cuts['test']])})
+            res_all = evaluator.evaluate(model, data, 'test', train_step=None, all_days=True,
+                                         save_path=save(ALL_DAYS_NAME))
+            # the metric over all days for regression / binary only, as main.py logs it (a C-index over every
+            # day of every patient is not Chronicle's C-index)
+            row.update({'value_all_days':res_all[evaluator.metric] if args.target_type!='survival' else np.nan,
+                        'empty_frac_all_days':data.empty_frac(*data.all_cuts('test'))})
+            args.logger.write('Test res: '+str(row))
+            rows.append(row)
+            write_csv(rows, out_dir/RESULTS_NAME)
+            if overall is not None:
+                label, metric, definition, score = overall
+                path = predictions_path(step_dir)
+                assert path is not None
+                overall_rows.append({'label':label, 'target':target, 'metric':metric, 'definition':definition,
+                                     'run':run, 'run_dir':run_dir.name, 'percentage':p, 'mask_draw':mask_draw,
+                                     'predictions':path.name, **score(path)})
+                args.logger.write('Overall evaluation: '+str(overall_rows[-1]))
+                write_csv(overall_rows, out_dir/OVERALL_NAME)
         args.logger.write('\nDone: '+str(out_dir))
 
 
@@ -399,7 +529,16 @@ def main():
         overall_tasks = {target:(label, metric, definition, score)
                          for label, target, metric, definition, score in label_tasks(load_sex(cfg['cohort']))}
 
-    ablation = Ablation(cfg, logger, device, overall_tasks)
+    chronicle = None
+    if cfg['chronicle_ablation'] is not None:
+        chronicle = chronicle_steps(cfg['chronicle_ablation'], cfg['percentages'])
+        logger.write('Masked features from Chronicle\'s feature ablation '+str(cfg['chronicle_ablation'])
+                     +' (num_mask_draws, include_static and seed are not used), '+str(len(chronicle))+' steps '
+                     '(percentage, fold = mask draw, number of removed features, file):\n'
+                     +'\n'.join(str((s['percentage'], s['mask_draw'], len(s['features']), str(s['source'])))
+                                for s in chronicle))
+
+    ablation = Ablation(cfg, logger, device, overall_tasks, chronicle)
     done, skipped_runs, failed = [], [], []
     for target, run, run_dir in models:
         reason = unusable(run_dir)
