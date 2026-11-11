@@ -36,8 +36,8 @@ num_mask_draws: 1
 include_static: true
 # seed of the feature draws
 seed: 2023
-# Either way, a test patient without any observation left (every time-series feature and every recorded static
-# feature masked) is not scored, as in Chronicle.
+# Either way, as in Chronicle, a test day without any observation left on it (time series or static) is not scored,
+# nor is a test patient without such a day; the random test days are drawn again from the days left.
 
 eval_batch_size: 32
 # save the predictions of every percentage (as predictions_test*.csv of a training run)

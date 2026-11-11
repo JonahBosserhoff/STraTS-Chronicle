@@ -146,14 +146,18 @@ sbatch --array=0-3 scripts/ablation.sbatch      # auf 4 GPUs verteilt (gleicher 
   `percentages` kommt exakt „Test res of the best checkpoint“ aus dem Trainingslog heraus. Wurden
   die Daten seit dem Training neu vorverarbeitet (andere Normalisierung), bricht die Ablation für
   dieses Modell mit Fehlermeldung ab.
-- **Patienten ohne Beobachtung:** Wie in Chronicle wird ein Test-Patient, dem keine einzige
-  Beobachtung bleibt, nicht ausgewertet. Das heißt: Alle seine Zeitreihen-Features sind maskiert, und
-  jedes dokumentierte statische Feature ist es auch, denn in Chronicle sind Alter und Geschlecht
-  Beobachtungen wie alle anderen. Die Anzahl steht in `num_patients_dropped`, die übrigen Patienten
-  behalten ihre Schnitt-Tage.
-- **Leere Historie:** Sind alle Features bis zum Schnitt-Tag maskiert, bleibt keine Beobachtung
-  übrig. STraTS kann darüber nicht attenden. Diese Schnitte werden nur aus den statischen Features
-  vorhergesagt (Zeitreihen-Embedding = 0). Ihr Anteil steht in der Spalte `empty_frac`.
+- **Leere Tage und Patienten:** Chronicle sagt einen Tag über das `<CLS>`-Token nach den
+  Beobachtungen dieses Tages vorher. Ein Tag, an dem nach dem Maskieren keine Beobachtung mehr übrig
+  ist, wird deshalb auch in STraTS nicht ausgewertet (Anteil: `days_dropped_frac`). Als Beobachtung
+  zählen Zeitreihen und nicht maskierte statische Features, denn in Chronicle sind Alter und
+  Geschlecht Beobachtungen wie alle anderen. Ein Test-Patient ohne einen solchen Tag fällt ganz raus
+  (`num_patients_dropped`). Die zufälligen Test-Tage werden mit dem Seed des Laufs neu aus den
+  übrigen Tagen gezogen, wie Chronicle seine Tage aus den vorhergesagten zieht. Ohne Maskierung sind
+  das genau die Ziehungen des Trainingslaufs.
+- **Leere Historie:** Bleibt bis zum Schnitt-Tag nur ein statisches Feature übrig und keine
+  Zeitreihen-Beobachtung, kann STraTS über die leere Sequenz nicht attenden. Diese Schnitte werden nur
+  aus den statischen Features vorhergesagt (Zeitreihen-Embedding = 0). Ihr Anteil steht in der Spalte
+  `empty_frac`.
 - **Ergebnis** in `output_dir`: `ablation_results.csv` (eine Zeile pro Modell, Prozentsatz und
   Mask-Draw: `metric`, `value`, `std` wie im Trainingslog, bei Regression/Binär auch
   `value_all_days`; außerdem `obs_masked_frac` = Anteil entfernter Test-Beobachtungen und

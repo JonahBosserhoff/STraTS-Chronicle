@@ -91,6 +91,7 @@ class ChronicleDataset:
         missing = np.setdiff1d(STATIC_VARIS, demo.columns)
         args.logger.write('Static variables not in the data (filled with the training mean): '+str(missing))
         assert norm is not None or len(missing)==0, 'Static variables not in the data: '+str(missing)
+        static_obs = data.loc[static_ii, ['ts_id', 'day', 'variable']] # their days, for ablation.py
         data = data.loc[~static_ii]
 
         # A patient without any time-series observation has no day to cut at (and an
@@ -133,8 +134,6 @@ class ChronicleDataset:
                     'variables':data.variable.unique()}
         self.norm = norm
         demo = demo.reindex(index=self.ts_ids, columns=STATIC_VARIS)
-        # which static features a patient has recorded (before mean filling): observations for ablation.py
-        self.demo_observed = demo.notna().to_numpy()
 
         self.demo = ((demo.fillna(norm['demo_mean'])-norm['demo_mean'])/norm['demo_std']).to_numpy()
         args.D = len(STATIC_VARIS)
@@ -159,6 +158,11 @@ class ChronicleDataset:
         self.days, self.times, self.values, self.varis = per_patient(data, [
             lambda df:df['day'].to_numpy(), lambda df:(df['day']/max_day*2-1).to_numpy(),
             lambda df:df['value'].to_numpy(), lambda df:df['variable'].map(var_to_ind).to_numpy()])
+        # the static observations per patient: day and index in STATIC_VARIS (only ablation.py reads them: in
+        # Chronicle they are observations like any other, so a day with only these left is still predicted)
+        static_ind = {v:j for j,v in enumerate(STATIC_VARIS)}
+        self.static_days, self.static_varis = per_patient(static_obs, [
+            lambda df:df['day'].to_numpy(), lambda df:df['variable'].map(static_ind).to_numpy()])
 
         # cut days per patient (sorted) and the target at each: [n, 2] = (remaining time, event)
         # for survival, [n, 1] otherwise
@@ -174,13 +178,19 @@ class ChronicleDataset:
                           +str([sum(len(self.cut_days[i]) for i in self.splits[s]) for s in split_ids])
                           +'; over these days: '+str({s:describe(s) for s in split_ids}))
 
-        rng = np.random.default_rng(args.seed)
-        self.eval_cuts = {split:[np.array([rng.choice(self.cut_days[i]) for i in self.splits[split]])
-                                 for _ in range(args.num_eval_draws)]
-                          for split in ['eval_train', 'val', 'test', 'external'] if split in self.splits}
         self.args = args
+        self.eval_cuts = self.draw_eval_cuts()
         if 'train' in self.splits:
             self.train_cycler = CycleIndex(self.splits['train'], args.train_batch_size)
+
+    def draw_eval_cuts(self):
+        """num_eval_draws random cut days per patient of every evaluation split, drawn with the run's seed, so every
+        evaluation (and every run) scores the same cuts. ablation.py draws them again from the cut days left after
+        masking: with nothing removed, these are exactly the same draws."""
+        rng = np.random.default_rng(self.args.seed)
+        return {split:[np.array([rng.choice(self.cut_days[i]) for i in self.splits[split]])
+                       for _ in range(self.args.num_eval_draws)]
+                for split in ['eval_train', 'val', 'test', 'external'] if split in self.splits}
 
     def all_cuts(self, split):
         """(patient index, cut day) for every cut day of every patient of a split."""

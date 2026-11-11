@@ -11,8 +11,8 @@ such a run is skipped, as is an unfinished run; both are logged and listed at th
 Test data. The test split is built as at the end of training (main.py): same patients, same cut days (the run's
 seed and num_eval_draws), same normalization (checked against inference.pkl), same metric (mean ± std over the
 draws of cut days and, for regression / binary targets, over every day with a target; the predictions of every
-day are saved for every target). Only the input changes (and, as in Chronicle, the patients without any observation
-left), so 0 % reproduces "Test res of the best checkpoint" of the run.
+day are saved for every target). Only the input changes and, as in Chronicle, the days and patients without any
+observation left (see Masking), so 0 % reproduces "Test res of the best checkpoint" of the run.
 
 Masked features, one of two sources:
 - chronicle_ablation: a path. The features Chronicle removed in its own feature ablation (chronicle-evaluate ...
@@ -37,13 +37,19 @@ Masking.
 - A masked time-series feature is removed from the test data: none of its observations is seen, as if it had
   never been recorded (the max_obs most recent observations are taken from the remaining ones).
 - A masked static feature is set to the training mean, as a missing static feature is.
-- A test patient without any observation left is not scored, as in Chronicle (ChronicleDataset.ablate_features):
-  every time-series observation masked and no static feature recorded that is not masked (in Chronicle the static
-  features are observations like any other). The number is reported (num_patients_dropped); the other patients keep
-  their cut days.
-- A cut whose history has no observation left (every feature observed up to the cut day masked, but the patient has
-  observations later or a static feature) is predicted from the static features alone, with the time-series
-  embedding set to 0: STraTS cannot attend over an empty sequence. Their share is reported (empty_frac).
+- As in Chronicle, a day without any observation left is not scored: Chronicle predicts a day through the <CLS>
+  token it puts after that day's observations, so a day whose observations are all masked has no prediction there.
+  A day counts as observed if a time-series observation or a static feature that is not masked is left on it (in
+  Chronicle age_at_diagnosis and gender_female are observations like any other). Their share of the test days with
+  a target is reported (days_dropped_frac). A test patient without such a day left is not scored at all
+  (num_patients_dropped; Chronicle leaves out a patient without any observation left, ChronicleDataset
+  .ablate_features, and has no prediction with a target for one whose days with a target are all gone).
+- The num_eval_draws random cut days per test patient are drawn again from the days left, with the run's seed
+  (ChronicleDataset.draw_eval_cuts), as Chronicle samples its random days from the days it predicted. With nothing
+  removed they are exactly the draws of the training run.
+- A cut whose history has no time-series observation left (only a static feature left on it and before it) is
+  predicted from the static features alone, with the time-series embedding set to 0: STraTS cannot attend over an
+  empty sequence. Their share is reported (empty_frac).
 
 Output in output_dir:
     ablation_results.csv             one row per model, p and mask draw: metric, std, share of masked observations,
@@ -229,39 +235,47 @@ def chronicle_steps(root, percentages):
 
 
 class MaskedDataset:
-    """The test split of a ChronicleDataset with some features masked; everything else is the dataset's own (same
-    cut days, draws of cut days, labels), except that, as in Chronicle, a test patient without any observation left
-    is not scored. Only get_batch reads the observations."""
+    """The test split of a ChronicleDataset with some features masked, scored as Chronicle scores it: Chronicle
+    predicts a day through the <CLS> token after that day's observations, so a day without any observation left is
+    not predicted, and a patient without such a day is not scored. Everything else is the dataset's own (labels,
+    the other splits); the random cut days of the test draws are drawn again from the days left (with the run's
+    seed, so with nothing removed they are the draws of the training run). Only get_batch reads the observations."""
     def __init__(self, dataset, masked):
         masked = set(masked)
         var_to_ind = {v:i for i,v in enumerate(dataset.norm['variables'])}
         masked_ind = np.array(sorted(var_to_ind[v] for v in masked if v in var_to_ind), dtype=np.int64)
         masked_static = [j for j,v in enumerate(STATIC_VARIS) if v in masked]
-        kept_static = [j for j in range(len(STATIC_VARIS)) if j not in masked_static]
         assert len(masked_ind)+len(masked_static)==len(masked), 'Masked features the model does not know'
         self.__dict__.update(dataset.__dict__)
-        self.days, self.times, self.values, self.varis = (list(x) for x in
-                                                          [dataset.days, dataset.times, dataset.values, dataset.varis])
-        test = np.asarray(dataset.splits['test'])
-        scored = np.ones(len(test), dtype=bool)
-        num_obs, num_kept = 0, 0
-        for k, i in enumerate(test):
+        self.days, self.times, self.values, self.varis, self.cut_days, self.cut_labels = (list(x) for x in [
+            dataset.days, dataset.times, dataset.values, dataset.varis, dataset.cut_days, dataset.cut_labels])
+        scored = []
+        num_obs, num_kept, num_cuts, num_cuts_kept = 0, 0, 0, 0
+        for i in dataset.splits['test']:
             keep = ~np.isin(dataset.varis[i], masked_ind)
             for name in ['days', 'times', 'values', 'varis']:
                 getattr(self, name)[i] = getattr(dataset, name)[i][keep]
             num_obs, num_kept = num_obs+len(keep), num_kept+int(keep.sum())
-            # Chronicle leaves out a patient with no observation left; its static features are observations too
-            scored[k] = bool(keep.any()) or bool(dataset.demo_observed[i, kept_static].any())
+            # days with an observation left: time series, or a static feature (an observation in Chronicle)
+            static_kept = ~np.isin(dataset.static_varis[i], masked_static)
+            observed = np.concatenate((self.days[i], dataset.static_days[i][static_kept]))
+            has_obs = np.isin(dataset.cut_days[i], observed)
+            self.cut_days[i], self.cut_labels[i] = dataset.cut_days[i][has_obs], dataset.cut_labels[i][has_obs]
+            num_cuts, num_cuts_kept = num_cuts+len(has_obs), num_cuts_kept+int(has_obs.sum())
+            if has_obs.any():
+                scored.append(i)
         self.obs_masked_frac = 1-num_kept/num_obs if num_obs>0 else np.nan
+        self.days_dropped_frac = 1-num_cuts_kept/num_cuts if num_cuts>0 else np.nan
+        self.num_patients_dropped = len(dataset.splits['test'])-len(scored)
         # new dicts: the dataset's own splits and draws stay as they are for the next mask
-        self.splits = {**dataset.splits, 'test':[int(i) for i in test[scored]]}
-        self.eval_cuts = {**dataset.eval_cuts, 'test':[cuts[scored] for cuts in dataset.eval_cuts['test']]}
-        self.num_patients_dropped = int((~scored).sum())
+        self.splits = {**dataset.splits, 'test':scored}
+        self.eval_cuts = self.draw_eval_cuts()
         # a masked static feature = the training mean = 0 after normalization, as a missing one
         self.demo = dataset.demo.copy()
         self.demo[:, masked_static] = 0.0
         self.num_masked_static = len(masked_static)
 
+    draw_eval_cuts = ChronicleDataset.draw_eval_cuts
     all_cuts = ChronicleDataset.all_cuts
     get_batch = ChronicleDataset.get_batch
 
@@ -431,17 +445,20 @@ class Ablation:
             args.logger.write('\n'+target+', run '+run+': '+str(p)+' % masked (mask draw '+str(mask_draw)+', '+source
                               +'): '+str(len(masked))+' of '+str(len(pool))+' features ('+str(data.num_masked_static)
                               +' static), '+str(data.obs_masked_frac)+' of the test observations; '
-                              +str(data.num_patients_dropped)+' test patients without any observation left, not scored'
+                              +str(data.days_dropped_frac)+' of the days with a target without any observation left '
+                              'and '+str(data.num_patients_dropped)+' test patients without such a day, not scored'
                               +(('; '+str(len(unknown))+' removed features the model does not know (not in its input '
                                  'anyway): '+str(unknown)) if unknown else ''))
             row = {'target':target, 'target_type':args.target_type, 'run':run, 'run_dir':run_dir.name,
                    'percentage':p, 'mask_draw':mask_draw, 'mask_source':source, 'num_features':len(pool),
                    'num_masked':len(masked), 'num_masked_static':data.num_masked_static,
                    'num_masked_unknown':len(unknown), 'obs_masked_frac':data.obs_masked_frac,
-                   'num_patients':num_scored, 'num_patients_dropped':data.num_patients_dropped,
+                   'days_dropped_frac':data.days_dropped_frac, 'num_patients':num_scored,
+                   'num_patients_dropped':data.num_patients_dropped,
                    'metric':evaluator.metric}
             if num_scored==0:
-                args.logger.write('WARNING: no test patient has an observation left, nothing scored')
+                args.logger.write('WARNING: no test patient has a day with a target and an observation left, '
+                                  'nothing scored')
                 rows.append({**row, 'value':np.nan, 'std':np.nan, 'empty_frac':np.nan, 'value_all_days':np.nan,
                              'empty_frac_all_days':np.nan})
                 write_csv(rows, out_dir/RESULTS_NAME)

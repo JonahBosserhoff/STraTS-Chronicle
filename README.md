@@ -205,10 +205,12 @@ drawn anew, independently of the others; the draw depends only on `seed`, p and 
 model gets the same masked features at the same p (`masked_features.csv`). A masked time-series feature is
 removed from the test data (as if never recorded); a masked static feature is set to the training mean, as
 a missing one. Patients, cut days, normalization and metric are those of the test evaluation at the end of
-training (0 % reproduces "Test res of the best checkpoint"), except that, as in Chronicle, a test patient without
-any observation left (every time-series feature and every recorded static feature masked) is not scored
-(`num_patients_dropped`). A cut with no observation left before it is predicted from the static features alone
-(time-series embedding 0); their share is reported as `empty_frac`.
+training (0 % reproduces "Test res of the best checkpoint"), except that, as in Chronicle (one `<CLS>` token after
+the observations of every day), a test day without any observation left on it (time series or a static feature)
+is not scored (`days_dropped_frac`), nor is a test patient without such a day (`num_patients_dropped`); the random
+test days are drawn again from the days left, with the run's seed. A cut with no time-series observation left
+before it is predicted from the static features alone (time-series embedding 0); their share is reported as
+`empty_frac`.
 Output: `ablation_results.csv` (metric per model, p and mask draw, as in the training log) and, with
 `cohort`, `ablation_overall_evaluation.csv` (metrics of `overall_evaluation.py`); details in the header of
 `src/ablation.py`.
