@@ -21,7 +21,7 @@ runs: null
 # the folder names percent_<p> / fold_<f> for a file without rows); the fold is the mask draw. num_mask_draws,
 # include_static and seed below are then not used.
 # null = draw the masked features here (percentages, num_mask_draws, include_static, seed).
-chronicle_ablation: null # e.g. /homes/jbosserhoff/Chronicle/runs/feature_ablation
+chronicle_ablation: /homes/jbosserhoff/Chronicle/runs/feature_ablation # e.g. /homes/jbosserhoff/Chronicle/runs/feature_ablation
 
 # percent of all features masked. 0 reproduces the test result of the training run.
 # Without chronicle_ablation: every percentage is drawn anew (independently of the other percentages), with the same
