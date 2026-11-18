@@ -91,8 +91,11 @@ bash scripts/train_chronicle.sbatch             # schickt alle Läufe als Job-Ar
   Argument von `main.py` geht, `null` = Default aus `parse_args`). `dataset`, `target`, `run` und
   `train_frac` (1.0) setzt das Skript selbst.
 - **Externe Validierung:** Das Target kommt automatisch aus dem trainierten Lauf (`model_dir` in
-  `configs/external_validation.yaml`). Die externe Kohorte braucht dessen Spalten. Bei einem
-  Regressions-Target muss `scaler_dir` auch `label_scalers.pkl` enthalten.
+  `configs/external_validation.yaml`). Inference läuft nur auf dem Test-Split der externen Kohorte:
+  der einen `*_test.csv` im Ordner `data_dir` (Output von `chronicle-preprocess`). Sie muss schon mit
+  den Scalern der Trainingskohorte skaliert sein (`--pretrained-scaler-dir`), das Skript skaliert
+  nicht nochmal. Sie braucht die Spalten des Targets. Regressions-Vorhersagen werden mit dem
+  Label-Scaler des Trainingslaufs (in `inference.pkl`) in Originaleinheiten gespeichert.
 
 ## Feature-Ablation
 
@@ -196,7 +199,7 @@ sbatch scripts/ablation.sbatch
 
 Gelesen werden aus dem Chronicle-Ordner die drei `*_{train,val,test}.csv` (Splits, schon
 skaliert) und `scalers/label_scalers.pkl` (nur, um Regressions-Vorhersagen in Originaleinheiten
-zu speichern). Für die externe Validierung braucht man zusätzlich die Feature-Scaler (`scaler_dir`).
+zu speichern). Für die externe Validierung wird aus deren Chronicle-Ordner nur `*_test.csv` gelesen.
 
 **Schneller als vorher:** Der Test-Split wird nur noch einmal am Ende mit dem besten Checkpoint
 ausgewertet statt in jeder Epoche (`eval_during_training: eval_train` in

@@ -172,20 +172,20 @@ Scores a trained model on an external cohort, without training:
 ```
 sbatch scripts/external_validation.sbatch      # or: cd src && python external_validation.py --config ../configs/external_validation.yaml
 ```
-`configs/external_validation.yaml` sets the external cohort (raw, unscaled CSV in Chronicle's long format, like
-the input of `chronicle-preprocess`, with the target's columns), the Chronicle scalers of the training
-cohort (`scaler_dir`, or `null` if the cohort is already scaled with them), the training run
-(`model_dir`) and `output_dir`. The target is the one of the training run (runs from before `--target`
-predict OS). The cohort goes through the same steps as the training data: Chronicle scalers (for a
-regression target also its label scaler), then the STraTS normalization of the training run from
+`configs/external_validation.yaml` sets the external cohort (`data_dir`: the output directory of
+`chronicle-preprocess` for it, with the target's columns), the training run (`model_dir`) and `output_dir`.
+Only the test split of the external cohort is scored: the one `*_test.csv` in `data_dir`. It must already
+be scaled with the Chronicle scalers of the training cohort (`chronicle-preprocess --pretrained-scaler-dir`);
+the script does not scale it again. The target is the one of the training run (runs from before `--target`
+predict OS). The test split then goes through the STraTS normalization of the training run from
 `inference.pkl` (variable vocabulary, per-variable mean/std, static mean/std), which `main.py` saves
 next to `checkpoint_best.bin`. Variables the model was not trained on are dropped; a missing static
 variable is filled with the training mean. The metric is computed over `num_eval_draws` random cut days
 per patient, as for the test split, and for regression / binary targets also over every day with a
 target. Output: `log.txt`, `predictions_external.csv` (columns as `predictions_test.csv`) and
 `predictions_external_all_days.csv` (every day with a target). Regression predictions are saved in
-the original units, with the label scaler from `scaler_dir` (or, with `scaler_dir: null`, the one
-saved in `inference.pkl`; runs from before this have none and stay in the scaled units).
+the original units, with the label scaler of the training run saved in `inference.pkl` (runs from
+before this have none and stay in the scaled units).
 
 ### Feature ablation
 Scores every trained model on the test split with a share of all features masked, without training:
