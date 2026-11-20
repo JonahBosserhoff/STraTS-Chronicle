@@ -1,13 +1,20 @@
 """Overall evaluation of all STraTS Chronicle runs in one folder: C-index (OS, TTNT) and AUROC (6 labs, transfusion,
-febrile neutropenia). Same thresholds, sampling and seed as Chronicle's overall_evaluation.py (and evaluate_os.py of
-the single-target repo), so the values compare.
+febrile neutropenia), with a 95% patient-bootstrap CI. Same thresholds, sampling, bootstrap and seed as Chronicle's
+overall_evaluation.py (and evaluate_os.py of the single-target repo), so the values compare.
 
     cd src && python overall_evaluation.py --cohort <cohort_dir> [--results_dir ../outputs/chronicle]
+    cd src && python overall_evaluation.py --external --cohort <external_cohort_dir> \\
+                                           [--results_dir ../outputs/chronicle_external]
 
 Reads   <results_dir>/<run>/predictions_test_all_days.csv   every run folder of main.py --dataset chronicle; the
                                                             target comes from the folder name (|target:<T>|)
         <cohort_dir>/<name of cohort_dir>.csv               sex per patient (feature_name == "gender_female")
-Writes  <results_dir>/overall_evaluation.csv
+Writes  <results_dir>/overall_evaluation.csv, <results_dir>/bootstrap_replicates.csv (one value per replicate)
+
+--external: the output_dir of external_validation.py instead (results_dir itself and every subfolder of it with
+predictions_external_all_days.csv). The target and run come from the folder name if it is a run folder name,
+otherwise from model_dir in its log.txt (the last one, if the log holds several). One output_dir per trained model:
+external_validation.py overwrites the predictions in output_dir. --cohort: the raw CSV of the external cohort.
 
 predictions_test_all_days.csv (main.py, evaluator_survival.py) holds every test day with a target, one row per
 patient and day:
@@ -23,8 +30,18 @@ A regression run whose log says its predictions were saved in the scaled units (
 scored: the thresholds are in the original units.
 Rows of a sex-specific lab (AST, ALT, creatinine) of patients with unknown sex are left out, with a warning.
 
-Every metric is computed on one random row per patient, N_ITER times. The interval is the 2.5 / 97.5 percentile over
-these draws: it reflects which day was drawn per patient, not the sampling of the patients.
+Point estimate: every metric is computed on one random row per patient, N_ITER times; the mean over these draws.
+ci_lo / ci_hi: 2.5 / 97.5 percentile over these draws; they reflect which day was drawn per patient, not the
+sampling of the patients.
+
+Bootstrap (boot_ci_lo / boot_ci_hi): N_BOOTSTRAP (500) replicates. Each replicate resamples the patients with
+replacement and then, like the point estimate, draws one random row for every drawn patient N_ITER (50) times (a
+patient drawn twice counts as two patients, each with its own random day), i.e. 500 x 50 = 25000 metric values. The
+replicate value is the mean of the metric over its 50 draws, so the interval is that of the point estimate (the mean
+over the day draws) under the sampling of the patients: 2.5 / 97.5 percentile over the 500 replicates. Day draws
+without a defined metric (one class only, no admissible pairs) are left out of a replicate's mean, replicates
+without any defined draw out of the interval, both with a warning. The point estimate and ci_lo / ci_hi are
+unchanged by the bootstrap (own random generator). --n_boot changes the number of replicates, 0 skips the bootstrap.
 
 This is not the same number as "Test res of the best checkpoint" in log.txt: that one is the mean over
 --num_eval_draws (10) draws of cut days fixed with --seed (2023), this one over N_ITER (50) draws with SEED (42).
@@ -41,9 +58,14 @@ from sklearn.metrics import roc_auc_score
 
 ALL_DAYS_NAME = "predictions_test_all_days.csv"
 DRAWS_NAME = "predictions_test.csv"  # fallback, see the docstring
+EXTERNAL_ALL_DAYS_NAME = "predictions_external_all_days.csv"  # external_validation.py
+EXTERNAL_DRAWS_NAME = "predictions_external.csv"
 OUTPUT_NAME = "overall_evaluation.csv"
+REPLICATES_NAME = "bootstrap_replicates.csv"
 SCALED_UNITS_WARNING = "predictions are saved in the scaled units"  # main.py, no Chronicle label scaler
+EXTERNAL_SCALED_UNITS_WARNING = "predictions are saved in the units of the model output"  # external_validation.py
 N_ITER = 50
+N_BOOTSTRAP = 500
 SEED = 42
 
 SURVIVAL_LABELS = ["OS", "TTNT"]
@@ -69,6 +91,10 @@ SURVIVAL_COLS = ["patient_id", "day", "time", "event", "prediction"]
 LAB_COLS = ["patient_id", "day", "prediction", "ground_truth"]
 
 RUN_DIR_PATTERN = re.compile(r"\|target:(?P<target>.+?)\|train_frac:.*\|run:(?P<run>[^|]+)$")
+# model_dir of the training run in the log of external_validation.py (str of its config)
+EXTERNAL_LOG_PATTERN = re.compile(
+    r"'model_dir': '[^']*\|target:(?P<target>[^|']+)\|train_frac:[^|']*\|run:(?P<run>[^|'/]+)/?'"
+)
 
 
 def patient_id_to_int(pid):
@@ -112,15 +138,33 @@ def find_runs(results_dir):
     return runs
 
 
-def predictions_path(run_dir):
-    """The predictions of every test day with a target, or the drawn days of an older survival run (with a
-    warning), or None."""
-    if (run_dir / ALL_DAYS_NAME).is_file():
-        return run_dir / ALL_DAYS_NAME
-    if (run_dir / DRAWS_NAME).is_file():
-        print(f"⚠️ {run_dir.name}: no {ALL_DAYS_NAME} (run from before it was saved for every target), "
-              f"using the drawn days of {DRAWS_NAME}: fewer days per patient than Chronicle samples from.")  # fmt: skip
-        return run_dir / DRAWS_NAME
+def find_external_runs(results_dir):
+    """(target, run tag, folder) of results_dir and every subfolder with predictions of external_validation.py; the
+    target from the folder name or else from model_dir in its log.txt."""
+    runs = []
+    for run_dir in [results_dir, *sorted(p for p in results_dir.iterdir() if p.is_dir())]:
+        if not any((run_dir / name).is_file() for name in (EXTERNAL_ALL_DAYS_NAME, EXTERNAL_DRAWS_NAME)):
+            continue
+        match = RUN_DIR_PATTERN.search(run_dir.name)
+        if match is None and (run_dir / "log.txt").is_file():
+            matches = list(EXTERNAL_LOG_PATTERN.finditer((run_dir / "log.txt").read_text(errors="replace")))
+            match = matches[-1] if matches else None
+        if match is None:
+            print(f"⚠️ {run_dir}: predictions, but no target (no run folder name, no model_dir in log.txt), skipped.")
+            continue
+        runs.append((match["target"], match["run"], run_dir))
+    return runs
+
+
+def predictions_path(run_dir, all_days_name=ALL_DAYS_NAME, draws_name=DRAWS_NAME):
+    """The predictions of every day with a target, or the drawn days of an older survival run (with a warning), or
+    None."""
+    if (run_dir / all_days_name).is_file():
+        return run_dir / all_days_name
+    if (run_dir / draws_name).is_file():
+        print(f"⚠️ {run_dir.name}: no {all_days_name} (run from before it was saved for every target), "
+              f"using the drawn days of {draws_name}: fewer days per patient than Chronicle samples from.")  # fmt: skip
+        return run_dir / draws_name
     print(f"⚠️ {run_dir.name}: no predictions (run not finished?), not evaluated.")
     return None
 
@@ -138,7 +182,10 @@ def load_predictions(path, columns):
 
 def saved_in_scaled_units(run_dir):
     log = run_dir / "log.txt"
-    return log.is_file() and SCALED_UNITS_WARNING in log.read_text(errors="replace")
+    if not log.is_file():
+        return False
+    text = log.read_text(errors="replace")
+    return SCALED_UNITS_WARNING in text or EXTERNAL_SCALED_UNITS_WARNING in text
 
 
 def with_row_threshold(df, path, threshold, sex):
@@ -171,12 +218,74 @@ def _summarise(scores, event_counts, n_patients):
     }
 
 
+BOOT_NOT_SCORED = {"boot_ci_lo": np.nan, "boot_ci_hi": np.nan, "n_boot_valid": 0, "n_boot": 0}
 NOT_SCORED = {"value": np.nan, "std": np.nan, "ci_lo": np.nan, "ci_hi": np.nan,
-              "n_patients": 0, "n_events_mean": np.nan, "prevalence_mean": np.nan, "n_iter": 0}  # fmt: skip
+              "n_patients": 0, "n_events_mean": np.nan, "prevalence_mean": np.nan, "n_iter": 0,
+              **BOOT_NOT_SCORED}  # fmt: skip
+REPLICATES_KEY = "boot_replicates"  # values of the replicates in a result row; main() moves them to REPLICATES_NAME
 
 
-def cindex_sampled(df, n_iter=N_ITER, seed=SEED):
-    """C-index of the risk score (higher = shorter time to the event), one random row per patient x n_iter."""
+def _cindex_safe(time, risk, event):
+    """lifelines C-index of ``risk`` (higher = shorter time); NaN without admissible pairs."""
+    try:
+        return concordance_index(time, -risk, event)
+    except ZeroDivisionError:  # no admissible pairs
+        return np.nan
+
+
+def _auroc_safe(y_true, y_score):
+    if y_true.size == 0 or y_true.sum() in (0, y_true.size):
+        return np.nan
+    return roc_auc_score(y_true, y_score)
+
+
+def bootstrap(pids, score_fn, label, n_iter=N_ITER, n_boot=N_BOOTSTRAP, seed=SEED):
+    """Patient bootstrap: ``n_boot`` replicates. Each replicate resamples the patients with replacement, then draws
+    one random row for every drawn patient ``n_iter`` times (copies independently); the replicate value is the mean
+    of the metric over these ``n_iter`` draws (undefined draws left out), as the point estimate.
+    ``score_fn(row positions) -> metric``. Returns the summary dict, with the replicate values under
+    REPLICATES_KEY."""
+    if n_boot <= 0 or len(pids) == 0:
+        return dict(BOOT_NOT_SCORED)
+    codes, uniques = pd.factorize(pids)
+    n = len(uniques)
+    order = np.argsort(codes, kind="stable")  # rows grouped by patient
+    bounds = np.searchsorted(codes[order], np.arange(n + 1))  # rows of patient k: order[bounds[k]:bounds[k + 1]]
+
+    rng = np.random.default_rng([seed, 1])  # separate from the day draws of the point estimate
+    values = np.empty(n_boot)
+    n_draws_undefined = 0
+    for b in range(n_boot):
+        draw = rng.integers(0, n, n)
+        starts, lengths = bounds[draw], bounds[draw + 1] - bounds[draw]
+        draws = np.empty(n_iter)
+        for i in range(n_iter):
+            picks = order[starts + (rng.random(n) * lengths).astype(np.int64)]
+            draws[i] = score_fn(picks)
+        undefined = np.isnan(draws)
+        n_draws_undefined += int(undefined.sum())
+        values[b] = draws[~undefined].mean() if not undefined.all() else np.nan
+
+    if n_draws_undefined:
+        print(f"⚠️ {label}: {n_draws_undefined}/{n_boot * n_iter} day draws within the bootstrap replicates "
+              "undefined (one class only / no admissible pairs), left out of the replicate means.")  # fmt: skip
+    valid = ~np.isnan(values)
+    if not valid.all():
+        print(f"⚠️ {label}: {int((~valid).sum())}/{n_boot} bootstrap replicates undefined (every day draw "
+              "undefined), left out of the interval.")  # fmt: skip
+    finite = values[valid]
+    return {
+        "boot_ci_lo": float(np.percentile(finite, 2.5)) if finite.size else np.nan,
+        "boot_ci_hi": float(np.percentile(finite, 97.5)) if finite.size else np.nan,
+        "n_boot_valid": int(valid.sum()),
+        "n_boot": n_boot,
+        REPLICATES_KEY: values,
+    }
+
+
+def cindex_sampled(df, n_iter=N_ITER, seed=SEED, n_boot=0, label="C-index"):
+    """C-index of the risk score (higher = shorter time to the event), one random row per patient x n_iter, plus
+    the patient bootstrap (n_boot replicates)."""
     if df.empty:
         return dict(NOT_SCORED)
     rng = np.random.default_rng(seed)
@@ -186,15 +295,17 @@ def cindex_sampled(df, n_iter=N_ITER, seed=SEED):
     for i in range(n_iter):
         subset = grouped.sample(n=1, random_state=rng.integers(0, 2**32 - 1))
         event_counts[i] = subset["event"].sum()
-        try:
-            scores[i] = concordance_index(subset["time"], -subset["prediction"], subset["event"])
-        except ZeroDivisionError:  # no admissible pairs
-            scores[i] = np.nan
-    return _summarise(scores, event_counts, df["patient_id"].nunique())
+        scores[i] = _cindex_safe(subset["time"], subset["prediction"], subset["event"])
+
+    time, risk, event = df["time"].to_numpy(), df["prediction"].to_numpy(), df["event"].to_numpy()
+    boot = bootstrap(df["patient_id"].to_numpy(), lambda p: _cindex_safe(time[p], risk[p], event[p]), label,
+                     n_iter=n_iter, n_boot=n_boot, seed=seed)  # fmt: skip
+    return {**_summarise(scores, event_counts, df["patient_id"].nunique()), **boot}
 
 
-def auroc_sampled(df, y_true, y_score, n_iter=N_ITER, seed=SEED):
-    """AUROC, one random row per patient x n_iter. ``y_true`` / ``y_score``: 0/1 labels / scores of the rows of df."""
+def auroc_sampled(df, y_true, y_score, n_iter=N_ITER, seed=SEED, n_boot=0, label="AUROC"):
+    """AUROC, one random row per patient x n_iter, plus the patient bootstrap (n_boot replicates).
+    ``y_true`` / ``y_score``: 0/1 labels / scores of the rows of df."""
     if df.empty:
         return dict(NOT_SCORED)
     rows_by_patient = list(df.groupby("patient_id", sort=True).indices.values())
@@ -205,28 +316,32 @@ def auroc_sampled(df, y_true, y_score, n_iter=N_ITER, seed=SEED):
         picks = np.array([rows[rng.integers(len(rows))] for rows in rows_by_patient])
         yt = y_true[picks]
         event_counts[i] = yt.sum()
-        scores[i] = np.nan if yt.sum() in (0, yt.size) else roc_auc_score(yt, y_score[picks])
-    return _summarise(scores, event_counts, len(rows_by_patient))
+        scores[i] = _auroc_safe(yt, y_score[picks])
+
+    boot = bootstrap(df["patient_id"].to_numpy(), lambda p: _auroc_safe(y_true[p], y_score[p]), label,
+                     n_iter=n_iter, n_boot=n_boot, seed=seed)  # fmt: skip
+    return {**_summarise(scores, event_counts, len(rows_by_patient)), **boot}
 
 
-def score_survival(path):
-    return cindex_sampled(load_predictions(path, SURVIVAL_COLS))
+def score_survival(path, n_boot=0, label="C-index"):
+    return cindex_sampled(load_predictions(path, SURVIVAL_COLS), n_boot=n_boot, label=label)
 
 
-def score_lab(path, threshold, direction, sex):
+def score_lab(path, threshold, direction, sex, n_boot=0, label="AUROC"):
     if saved_in_scaled_units(path.parent):
         print(f"⚠️ {path}: predictions in the scaled units (no Chronicle label scaler), not evaluated.")
         return dict(NOT_SCORED)
     df = with_row_threshold(load_predictions(path, LAB_COLS), path, threshold, sex)
     truth, cut, prediction = df["ground_truth"].to_numpy(), df["threshold"].to_numpy(), df["prediction"].to_numpy()
     if direction == "min":
-        return auroc_sampled(df, (truth < cut).astype(int), -prediction)
-    return auroc_sampled(df, (truth > cut).astype(int), prediction)
+        return auroc_sampled(df, (truth < cut).astype(int), -prediction, n_boot=n_boot, label=label)
+    return auroc_sampled(df, (truth > cut).astype(int), prediction, n_boot=n_boot, label=label)
 
 
-def score_binary(path):
+def score_binary(path, n_boot=0, label="AUROC"):
     df = load_predictions(path, LAB_COLS)
-    return auroc_sampled(df, df["ground_truth"].to_numpy().astype(int), df["prediction"].to_numpy())
+    return auroc_sampled(df, df["ground_truth"].to_numpy().astype(int), df["prediction"].to_numpy(),
+                         n_boot=n_boot, label=label)  # fmt: skip
 
 
 def lab_definition(threshold, direction):
@@ -236,26 +351,38 @@ def lab_definition(threshold, direction):
     return f"{op} {threshold:g}"
 
 
-def label_tasks(sex):
-    """(label, target, metric, definition, path -> result row) of every label, in reporting order."""
-    tasks = [(label, label, "C-index", "time to event", score_survival) for label in SURVIVAL_LABELS]
+def label_tasks(sex, n_boot=0):
+    """(label, target, metric, definition, path -> result row) of every label, in reporting order. ``n_boot``:
+    bootstrap replicates (0: none, as for the ablation); the result row then holds their values under
+    REPLICATES_KEY."""
+    tasks = []
+    for label in SURVIVAL_LABELS:
+        def score(path, label=label):
+            return score_survival(path, n_boot, label)
+
+        tasks.append((label, label, "C-index", "time to event", score))
     for lab, (target, threshold, direction) in LAB_LABELS.items():
-        def score(path, threshold=threshold, direction=direction):
-            return score_lab(path, threshold, direction, sex)
+        def score(path, lab=lab, threshold=threshold, direction=direction):
+            return score_lab(path, threshold, direction, sex, n_boot, lab)
 
         tasks.append((lab, target, "AUROC", lab_definition(threshold, direction), score))
-    tasks += [(lab, target, "AUROC", "0/1", score_binary) for lab, target in BINARY_LABELS.items()]
+    for lab, target in BINARY_LABELS.items():
+        def score(path, lab=lab):
+            return score_binary(path, n_boot, lab)
+
+        tasks.append((lab, target, "AUROC", "0/1", score))
     return tasks
 
 
 def overview_row(row):
-    mean = row["value"]
+    mean, boot_lo = row["value"], row["boot_ci_lo"]
     return {
         "label": row["label"],
         "run": row["run"],
         "definition": row["definition"],
         "metric": row["metric"],
         "value [interval]": "—" if np.isnan(mean) else f"{mean:.3f} [{row['ci_lo']:.3f}, {row['ci_hi']:.3f}]",
+        "bootstrap 95% CI": "—" if np.isnan(boot_lo) else f"[{boot_lo:.3f}, {row['boot_ci_hi']:.3f}]",
         "patients": row["n_patients"],
         "events": "—" if np.isnan(row["n_events_mean"]) else f"{row['n_events_mean']:.0f}",
         "prevalence": "—" if np.isnan(row["prevalence_mean"]) else f"{row['prevalence_mean']:.1%}",
@@ -263,16 +390,24 @@ def overview_row(row):
 
 
 def main(args):
-    results_dir = Path(args.results_dir)
+    results_dir = Path(args.results_dir or ("../outputs/chronicle_external" if args.external else "../outputs/chronicle"))
     if not results_dir.is_dir():
         raise SystemExit(f"{results_dir} does not exist. Check --results_dir.")
     sex = load_sex(args.cohort)
-    runs = find_runs(results_dir)
-    if not runs:
-        raise SystemExit(f"{results_dir}: no run folders (…|target:<T>|train_frac:…|run:<r>). Check --results_dir.")
+    if args.external:
+        runs = find_external_runs(results_dir)
+        names = (EXTERNAL_ALL_DAYS_NAME, EXTERNAL_DRAWS_NAME)
+        if not runs:
+            raise SystemExit(f"{results_dir}: no output of external_validation.py (with {EXTERNAL_ALL_DAYS_NAME} and "
+                             "model_dir in log.txt) in it or its subfolders. Check --results_dir.")  # fmt: skip
+    else:
+        runs = find_runs(results_dir)
+        names = (ALL_DAYS_NAME, DRAWS_NAME)
+        if not runs:
+            raise SystemExit(f"{results_dir}: no run folders (…|target:<T>|train_frac:…|run:<r>). Check --results_dir.")
 
-    tasks = label_tasks(sex)
-    rows = []
+    tasks = label_tasks(sex, args.n_boot)
+    rows, replicates = [], []
     for label, target, metric, definition, score in tasks:
         info = {"label": label, "metric": metric, "definition": definition, "target": target}
         target_runs = [(run, run_dir) for t, run, run_dir in runs if t == target]
@@ -280,8 +415,11 @@ def main(args):
             rows.append({**info, "run": "—", "run_dir": "—", **NOT_SCORED})
         for run, run_dir in target_runs:
             print(f"{label}: run {run}", flush=True)
-            path = predictions_path(run_dir)
+            path = predictions_path(run_dir, *names)
             result = dict(NOT_SCORED) if path is None else score(path)
+            values = result.pop(REPLICATES_KEY, np.array([]))
+            replicates.append(pd.DataFrame({"label": label, "metric": metric, "run": run, "run_dir": run_dir.name,
+                                            "replicate": np.arange(1, len(values) + 1), "value": values}))  # fmt: skip
             rows.append({**info, "run": run, "run_dir": run_dir.name, "predictions": path and path.name, **result})
 
     known = {target for _, target, *_ in tasks}
@@ -291,22 +429,31 @@ def main(args):
 
     out_path = results_dir / OUTPUT_NAME
     pd.DataFrame(rows).to_csv(out_path, index=False)
+    replicates_path = results_dir / REPLICATES_NAME
+    if args.n_boot > 0:
+        pd.concat(replicates, ignore_index=True).to_csv(replicates_path, index=False)
 
     overview = pd.DataFrame([overview_row(row) for row in rows])
     print(f"\nResults: {results_dir}\n")
     print(overview.to_string(index=False))
+    print(f"\nvalue [interval]: mean over the day draws [2.5, 97.5 percentile over the day draws]; "
+          f"bootstrap 95% CI: patient bootstrap, {args.n_boot} replicates, each the mean over its own day draws.")  # fmt: skip
 
     not_scored = overview.loc[overview["value [interval]"] == "—", "label"].tolist()
     if not_scored:
         print(f"\nWARNING: {len(not_scored)}/{len(overview)} rows not scored (no run / predictions, scaled units, "
               f"sex unknown, or no events): {', '.join(not_scored)}")  # fmt: skip
-    print(f"\nWrote {out_path}")
+    print(f"\nWrote {out_path}" + (f"\nWrote {replicates_path}" if args.n_boot > 0 else ""))
 
 
 def build_parser():
     p = argparse.ArgumentParser(description="C-index / AUROC of all STraTS Chronicle runs in one folder.")
-    p.add_argument("--results_dir", type=str, default="../outputs/chronicle", help="folder holding one subfolder per run")
+    p.add_argument("--results_dir", type=str, default=None,
+                   help="folder holding one subfolder per run (default ../outputs/chronicle, with --external "
+                        "../outputs/chronicle_external)")  # fmt: skip
     p.add_argument("--cohort", type=str, required=True, help="cohort directory holding <name of the directory>.csv")
+    p.add_argument("--external", action="store_true", help="evaluate the output of external_validation.py")
+    p.add_argument("--n_boot", type=int, default=N_BOOTSTRAP, help="bootstrap replicates (0: no bootstrap)")
     return p
 
 

@@ -70,7 +70,12 @@ bash scripts/train_chronicle.sbatch             # schickt alle Läufe als Job-Ar
   `overall_evaluation.py`):
   ```bash
   cd src && python overall_evaluation.py --cohort <kohorten_ordner>   # liest ../outputs/chronicle
+  # externe Validierung: output_dir von external_validation.py, Kohorte = rohe CSV der externen Kohorte
+  cd src && python overall_evaluation.py --external --cohort <externe_kohorte> --results_dir ../outputs/chronicle_external
   ```
+  Dazu 95%-Patienten-Bootstrap wie im Chronicle-Repo (`boot_ci_lo`/`boot_ci_hi`; 500 Replikate × 50
+  Tages-Ziehungen, Replikatwert = Mittel über die 50 Ziehungen; `--n_boot 0` schaltet ihn ab). Die Werte
+  der Replikate stehen in `bootstrap_replicates.csv`.
   `<kohorten_ordner>/<ordnername>.csv` ist die rohe Kohorten-CSV (Geschlecht für AST/ALT/Kreatinin).
   Ergebnis: eine Zeile pro Lauf in `outputs/chronicle/overall_evaluation.csv`. Die Werte weichen
   leicht vom Log ab (dort 10 Ziehungen mit Seed 2023). Survival-Läufe (OS, TTNT), die trainiert wurden,
